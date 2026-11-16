@@ -32,6 +32,10 @@
 #include <common/cvt.h>
 #include <common/thread.h>
 
+#if EKA2L1_PLATFORM(WEB)
+#include <emscripten/threading.h>
+#endif
+
 namespace eka2l1::common {
 #if EKA2L1_PLATFORM(WIN32)
     void set_thread_priority(const thread_priority pri) {
@@ -120,6 +124,9 @@ namespace eka2l1::common {
     void set_thread_name(const char *thread_name) {
 #if EKA2L1_PLATFORM(DARWIN)
         pthread_setname_np(thread_name);
+#elif EKA2L1_PLATFORM(WEB)
+        // Shows up as the worker's name in the browser's debugger.
+        emscripten_set_thread_name(pthread_self(), thread_name);
 #else
         pthread_setname_np(pthread_self(), thread_name);
 #endif

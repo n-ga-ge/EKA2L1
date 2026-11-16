@@ -52,6 +52,7 @@
 #define CPU_TYPE kAarch64
 #elif EKA2L1_ARCH(X64)
 #define CPU_TYPE kx86_64
-#elif EKA2L1_ARCH(ARM)
+#elif EKA2L1_ARCH(ARM) || EKA2L1_PLATFORM(WEB)
+// wasm32 is a plain 32-bit little-endian target; kARM selects no assembly paths.
 #define CPU_TYPE kARM
 #endif

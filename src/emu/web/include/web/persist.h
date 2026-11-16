@@ -1,0 +1,27 @@
+// Copyright (c) 2026 EKA2L1 Team.
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+#include <functional>
+#include <string>
+
+namespace eka2l1::web::persist {
+    // The emulator works on an in-memory data tree; this mirrors it to the
+    // origin's private file system (OPFS) so installed devices, games and saves
+    // survive a reload. Running directly on OPFS is not an option: the ROM is
+    // memory-mapped, which that backend does not support, and per-call
+    // proxying would slow every guest file access.
+
+    // Mounts persistent storage and copies a previous snapshot into `live_root`.
+    // Returns false when storage is unavailable or empty. Call before the
+    // emulator reads its data tree.
+    bool restore(const std::string &live_root);
+
+    // Starts the background mirror: copies files that changed since the last
+    // pass, removes ones that disappeared, on request and every few seconds.
+    // `on_saved` is called after a pass that wrote something.
+    void start(const std::string &live_root, std::function<void(std::size_t)> on_saved);
+
+    // Asks for a pass now (after an install, or when the page is being hidden).
+    void request_save();
+}

@@ -2,7 +2,7 @@ if (WIN32)
     set(CUSTOM_COMMON_SOURCE
             src/watcher_win32.h
             src/watcher_win32.cpp)
-elseif (UNIX AND NOT APPLE)
+elseif (UNIX AND NOT APPLE AND NOT EKA2L1_WEB)
     set(CUSTOM_COMMON_SOURCE
             src/watcher_unix.h
             src/watcher_unix.cpp)

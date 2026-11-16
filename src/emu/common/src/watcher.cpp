@@ -23,7 +23,7 @@
 #if EKA2L1_PLATFORM(WIN32)
 #include "watcher_win32.h"
 #else
-#if EKA2L1_PLATFORM(UNIX)
+#if EKA2L1_PLATFORM(UNIX) && !EKA2L1_PLATFORM(WEB)
 #include "watcher_unix.h"
 #else
 #include "watcher_null.h"

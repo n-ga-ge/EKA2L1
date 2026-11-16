@@ -23,7 +23,7 @@
 #include <drivers/graphics/backend/ogl/graphics_ogl.h>
 
 #include <common/platform.h>
-#if EKA2L1_PLATFORM(IOS)
+#if EKA2L1_PLATFORM(DIRECT_GLES3)
 #include <drivers/graphics/backend/ogl/ios_gl_loader.h>
 #else
 #include <glad/glad.h>
@@ -121,7 +121,7 @@ namespace eka2l1::drivers {
         drivers::texture_data_type converted_data_type = tex_data_type;
 
         auto *ogl_driver = static_cast<ogl_graphics_driver *>(driver);
-#if EKA2L1_PLATFORM(IOS)
+#if EKA2L1_PLATFORM(DIRECT_GLES3)
         const bool use_bgra_internal_format = false;
 #else
         const bool use_bgra_internal_format = ogl_driver->is_stricted() && !ogl_driver->convert_bgra_uploads();

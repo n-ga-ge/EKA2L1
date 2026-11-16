@@ -32,7 +32,7 @@
 #include <drivers/graphics/backend/ogl/buffer_ogl.h>
 #include <drivers/graphics/backend/ogl/fb_ogl.h>
 #include <common/platform.h>
-#if EKA2L1_PLATFORM(IOS)
+#if EKA2L1_PLATFORM(DIRECT_GLES3)
 #include <drivers/graphics/backend/ogl/ios_gl_loader.h>
 #else
 #include <glad/glad.h>
@@ -40,6 +40,10 @@
 
 #if EKA2L1_PLATFORM(ANDROID)
 #include <EGL/egl.h>
+#endif
+
+#if EKA2L1_PLATFORM(WEB)
+#include <emscripten.h>
 #endif
 
 #define IMGUI_IMPL_OPENGL_LOADER_GLAD
@@ -924,7 +928,7 @@ namespace eka2l1::drivers {
         if (vert_off == 0) {
             glDrawElements(prim_mode_to_gl_enum(prim_mode), count, data_format_to_gl_enum(val_type), reinterpret_cast<GLvoid *>(index_off_64));
         } else {
-#if EKA2L1_PLATFORM(IOS)
+#if EKA2L1_PLATFORM(DIRECT_GLES3)
             // ios_gl_loader's glDrawElementsBaseVertex stub drops the base vertex
             // (GLES3.0 has no base-vertex draw). No caller passes a non-zero base
             // today; surface it loudly if one ever does instead of silently
@@ -1903,6 +1907,9 @@ namespace eka2l1::drivers {
 
     void ogl_graphics_driver::display(command &cmd) {
         context_->swap_buffers();
+#if EKA2L1_PLATFORM(WEB)
+        presented_ = true;
+#endif
 
         disp_hook_();
         finish(cmd.status_, 0);
@@ -2081,6 +2088,42 @@ namespace eka2l1::drivers {
         }
     }
 
+#if EKA2L1_PLATFORM(WEB)
+    // A browser only shows what was drawn to an OffscreenCanvas once its worker
+    // returns to the event loop, so the driver cannot sit in a blocking loop.
+    // It runs as the thread's animation-frame callback instead: each call
+    // executes queued command lists until one presents (or nothing arrives for
+    // a short while), then yields so the frame reaches the page.
+    void ogl_graphics_driver::run_until_present() {
+        static constexpr int WAIT_MICROSECONDS = 4000;
+
+        presented_ = false;
+
+        while (!should_stop && !presented_) {
+            std::optional<command_list> list = list_queue.pop(WAIT_MICROSECONDS);
+
+            if (!list) {
+                break;
+            }
+
+            for (std::size_t i = 0; i < list->size_; i++) {
+                dispatch(list->base_[i]);
+            }
+
+            delete[] list->base_;
+        }
+
+        if (should_stop) {
+            emscripten_cancel_main_loop();
+        }
+    }
+
+    void ogl_graphics_driver::run() {
+        emscripten_set_main_loop_arg([](void *self) {
+            static_cast<ogl_graphics_driver *>(self)->run_until_present();
+        }, this, 0, true);
+    }
+#else
     void ogl_graphics_driver::run() {
         while (!should_stop) {
             std::optional<command_list> list = list_queue.pop();
@@ -2100,6 +2143,7 @@ namespace eka2l1::drivers {
             delete[] list->base_;
         }
     }
+#endif
 
     void ogl_graphics_driver::abort() {
         list_queue.abort();

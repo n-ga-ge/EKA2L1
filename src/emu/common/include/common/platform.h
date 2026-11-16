@@ -104,6 +104,12 @@
 #define EKA2L1_PLATFORM_ANDROID 1
 #endif
 
+#ifdef __EMSCRIPTEN__
+// Browser build (WebAssembly). Emscripten also defines __unix__, so UNIX and
+// POSIX are set as well; test WEB first wherever the two differ.
+#define EKA2L1_PLATFORM_WEB 1
+#endif
+
 #ifdef __EPOC32__
 #define EKA2L1_PLATFORM_SYMBIAN 1
 
@@ -116,4 +122,11 @@
 
 #if EKA2L1_PLATFORM(ANDROID) || EKA2L1_PLATFORM(UNIX) || EKA2L1_PLATFORM(MACOS) || EKA2L1_PLATFORM(IOS)
 #define EKA2L1_PLATFORM_POSIX 1
+#endif
+
+// Platforms whose OpenGL backend links GLES3 entry points directly instead of
+// going through glad (iOS: OpenGLES.framework, web: WebGL2). They share the
+// GLES-only texture paths: no BGR/BGRA uploads, everything promoted to RGBA8.
+#if EKA2L1_PLATFORM(IOS) || EKA2L1_PLATFORM(WEB)
+#define EKA2L1_PLATFORM_DIRECT_GLES3 1
 #endif

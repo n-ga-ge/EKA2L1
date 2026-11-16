@@ -29,7 +29,7 @@
 #include <common/queue.h>
 #include <common/region.h>
 #include <common/platform.h>
-#if EKA2L1_PLATFORM(IOS)
+#if EKA2L1_PLATFORM(DIRECT_GLES3)
 #include <drivers/graphics/backend/ogl/ios_gl_loader.h>
 #else
 #include <glad/glad.h>
@@ -131,6 +131,11 @@ namespace eka2l1::drivers {
 
         ogl_state backup;
         std::atomic_bool should_stop;
+
+#if EKA2L1_PLATFORM(WEB)
+        bool presented_ = false;
+        void run_until_present();
+#endif
         std::atomic_bool surface_update_needed;
 
         input_descriptors_ogl *active_input_descriptors_;

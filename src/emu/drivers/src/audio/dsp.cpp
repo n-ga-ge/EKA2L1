@@ -28,7 +28,9 @@
 #endif
 
 namespace eka2l1::drivers {
-#if EKA2L1_PLATFORM(IOS) && !EKA2L1_HAS_FFMPEG
+// Builds without FFmpeg (iOS when it is switched off, and the web build) still
+// play raw PCM streams, which is what games feed the DevSound path.
+#if !EKA2L1_HAS_FFMPEG
     struct dsp_output_stream_pcm final : public dsp_output_stream_shared {
         explicit dsp_output_stream_pcm(drivers::audio_driver *aud)
             : dsp_output_stream_shared(aud) {
@@ -62,7 +64,7 @@ namespace eka2l1::drivers {
 
         bool format(const four_cc fmt) override {
             if ((fmt != PCM16_FOUR_CC_CODE) && (fmt != PCM8_FOUR_CC_CODE)) {
-                LOG_WARN(DRIVER_AUD, "iOS DSP output only supports PCM formats for now");
+                LOG_WARN(DRIVER_AUD, "DSP output without FFmpeg only supports PCM formats");
                 return false;
             }
 
@@ -140,10 +142,8 @@ namespace eka2l1::drivers {
         case dsp_stream_backend_ffmpeg:
 #if EKA2L1_HAS_FFMPEG
             return std::make_unique<dsp_output_stream_ffmpeg>(aud);
-#elif EKA2L1_PLATFORM(IOS)
-            return std::make_unique<dsp_output_stream_pcm>(aud);
 #else
-            break;
+            return std::make_unique<dsp_output_stream_pcm>(aud);
 #endif
 
         default:

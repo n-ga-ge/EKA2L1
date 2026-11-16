@@ -23,6 +23,8 @@
 
 #if EKA2L1_PLATFORM(IOS)
 #include <drivers/audio/backend/audiounit_ios/audio_audiounit_ios.h>
+#elif EKA2L1_PLATFORM(WEB)
+#include <drivers/audio/backend/web/audio_web.h>
 #else
 #include <drivers/audio/backend/cubeb/audio_cubeb.h>
 #endif
@@ -149,6 +151,9 @@ namespace eka2l1::drivers {
             // cubeb on iOS would need invasive patches to the upstream
             // CoreAudio HAL code path, see drivers/.../audiounit_ios/.
             return std::make_unique<audiounit_ios_audio_driver>(initial_master_vol, preferred_midi_backend);
+#elif EKA2L1_PLATFORM(WEB)
+            // No cubeb in the browser; see drivers/.../backend/web/.
+            return std::make_unique<web_audio_driver>(initial_master_vol, preferred_midi_backend);
 #else
             return std::make_unique<cubeb_audio_driver>(initial_master_vol, preferred_midi_backend);
 #endif

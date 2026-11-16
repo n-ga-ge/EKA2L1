@@ -26,7 +26,7 @@ endif ()
 # Qt Multimedia backs the desktop camera. It is optional -- a build without it
 # keeps the null camera -- and is looked up here, the scope both drivers/ and
 # qt/ inherit the imported target from.
-if (EKA2L1_ENABLE_QT_CAMERA AND NOT ANDROID AND NOT EKA2L1_IOS)
+if (EKA2L1_ENABLE_QT_CAMERA AND NOT ANDROID AND NOT EKA2L1_IOS AND NOT EKA2L1_WEB)
     find_package(Qt6 COMPONENTS Multimedia QUIET)
 
     if (NOT Qt6Multimedia_FOUND)
@@ -59,6 +59,8 @@ if (ANDROID)
     add_subdirectory(android/app/src/main/cpp)
 elseif (EKA2L1_IOS)
     add_subdirectory(ios)
+elseif (EKA2L1_WEB)
+    add_subdirectory(web)
 else()
     add_subdirectory(qt)
 endif()

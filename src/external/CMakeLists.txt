@@ -211,7 +211,7 @@ add_subdirectory(glm)
 # Dynarmic: disable tests
 option(DYNARMIC_TESTS "Enable dynarmic tests" OFF)
 
-if (NOT ARCHITECTURE_ARM32 AND (NOT EKA2L1_IOS OR EKA2L1_IOS_DYNARMIC))
+if (NOT ARCHITECTURE_ARM32 AND NOT EKA2L1_WEB AND (NOT EKA2L1_IOS OR EKA2L1_IOS_DYNARMIC))
     # On iOS, dynarmic is only compiled when EKA2L1_IOS_DYNARMIC is set
     # (simulator default, sideload-only device builds); App Store / TestFlight
     # builds omit it entirely.
@@ -330,7 +330,8 @@ option (BUNDLE_SPEEX "Bundle the speex library" ON)
 # Sanitizers come from the global compiler flags, not cubeb's sanitizers-cmake
 option (USE_SANITIZERS "Use sanitizers" OFF)
 
-if (NOT EKA2L1_IOS)
+if (NOT EKA2L1_IOS AND NOT EKA2L1_WEB)
+    # The web port has its own Web Audio driver; cubeb has no browser backend.
     # iOS uses a native AURemoteIO audio_driver (see
     # src/emu/drivers/.../audiounit_ios). cubeb's bundled cubeb_audiounit.cpp
     # targets macOS CoreAudio HAL and doesn't cleanly compile on the iOS SDK.
@@ -340,7 +341,7 @@ endif()
 
 # FFMPEG
 option(EKA2L1_IOS_ENABLE_FFMPEG "Build FFmpeg audio/video support on iOS" ON)
-if(NOT EKA2L1_IOS OR EKA2L1_IOS_ENABLE_FFMPEG)
+if((NOT EKA2L1_IOS OR EKA2L1_IOS_ENABLE_FFMPEG) AND NOT EKA2L1_WEB)
     add_subdirectory(ffmpeg)
     set(EKA2L1_HAVE_FFMPEG ON CACHE INTERNAL "FFmpeg is available for this build" FORCE)
 else()
@@ -400,7 +401,7 @@ set (TSF_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "TSF include path")
 
 # SDL2
 # Can't believe in 2022 the official CMake can't still ship a FindSDL2 with the program...
-if (NOT ANDROID AND NOT EKA2L1_IOS)
+if (NOT ANDROID AND NOT EKA2L1_IOS AND NOT EKA2L1_WEB)
     set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/sdl2-cmake-scripts")
 
     if(APPLE)
@@ -429,6 +430,23 @@ set(USE_LIBCPP OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(uvw)
 add_subdirectory(uvlooper)
+
+if (EKA2L1_WEB)
+    # libuv picks its platform layer by CMAKE_SYSTEM_NAME and has none for
+    # Emscripten. Give it the portable pieces it ships (clock_gettime timer, no
+    # file watching, no process title) plus our own poll layer, which lives with
+    # the web frontend.
+    include(FetchContent)
+    FetchContent_GetProperties(libuv SOURCE_DIR EKA2L1_LIBUV_SOURCE_DIR)
+    target_sources(uv_a PRIVATE
+        ${EKA2L1_LIBUV_SOURCE_DIR}/src/unix/posix-hrtime.c
+        ${EKA2L1_LIBUV_SOURCE_DIR}/src/unix/no-fsevents.c
+        ${EKA2L1_LIBUV_SOURCE_DIR}/src/unix/no-proctitle.c
+        ${PROJECT_SOURCE_DIR}/src/emu/web/src/uv_web.c)
+    target_include_directories(uv_a PRIVATE
+        ${EKA2L1_LIBUV_SOURCE_DIR}/src
+        ${EKA2L1_LIBUV_SOURCE_DIR}/src/unix)
+endif()
 
 # UPNP
 

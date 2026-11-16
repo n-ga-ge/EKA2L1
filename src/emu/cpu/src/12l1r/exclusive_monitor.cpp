@@ -19,6 +19,8 @@
 
 #include <cpu/12l1r/exclusive_monitor.h>
 
+#include <algorithm>
+
 namespace eka2l1::arm::r12l1 {
     exclusive_monitor::exclusive_monitor(const std::size_t processor_count)
         :

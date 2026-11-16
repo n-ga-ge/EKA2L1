@@ -20,7 +20,7 @@
 
 #include <drivers/graphics/backend/ogl/shader_ogl.h>
 #include <common/platform.h>
-#if EKA2L1_PLATFORM(IOS)
+#if EKA2L1_PLATFORM(DIRECT_GLES3)
 #include <drivers/graphics/backend/ogl/ios_gl_loader.h>
 #else
 #include <glad/glad.h>

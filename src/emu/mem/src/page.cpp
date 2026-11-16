@@ -19,6 +19,8 @@
 
 #include <mem/page.h>
 
+#include <algorithm>
+
 namespace eka2l1::mem {
     page_table::page_table(const std::uint32_t id, const std::size_t page_size)
         : id_(id)

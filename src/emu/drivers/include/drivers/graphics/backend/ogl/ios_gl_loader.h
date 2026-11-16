@@ -1,4 +1,4 @@
-// iOS GLES3 shim that stands in for <glad/glad.h>.
+// GLES3 shim that stands in for <glad/glad.h> on iOS and on the web (WebGL2).
 //
 // glad is not built on iOS. The ogl backend was originally written
 // against desktop GL / GLES via glad's function-pointer table. On iOS we link
@@ -11,8 +11,8 @@
 
 #include <common/platform.h>
 
-#if !EKA2L1_PLATFORM(IOS)
-#error "ios_gl_loader.h is iOS-only; desktop and Android still use <glad/glad.h>."
+#if !EKA2L1_PLATFORM(DIRECT_GLES3)
+#error "ios_gl_loader.h is for iOS and web only; desktop and Android still use <glad/glad.h>."
 #endif
 
 // OpenGLES.framework is deprecated since iOS 12 but still ships; silence the
@@ -21,8 +21,14 @@
 #define GLES_SILENCE_DEPRECATION 1
 #endif
 
+#if EKA2L1_PLATFORM(WEB)
+// Emscripten maps these straight onto WebGL2.
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#else
 #include <OpenGLES/ES3/gl.h>
 #include <OpenGLES/ES3/glext.h>
+#endif
 
 // --- glad function-table fall-throughs --------------------------------------
 // glad emits both bare names (`glLineWidth`) and prefixed pointers

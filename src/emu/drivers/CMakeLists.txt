@@ -20,6 +20,13 @@ if (EKA2L1_IOS)
     set(DRIVERS_HWRM_IOS_SRC
             include/drivers/hwrm/backend/vibration_ios.h
             src/hwrm/backend/vibration_ios.mm)
+elseif (EKA2L1_WEB)
+    # The browser has no cubeb backend; audio goes through a Web Audio driver.
+    set(DRIVERS_WEB_SRC
+            include/drivers/audio/backend/web/audio_web.h
+            include/drivers/audio/backend/web/stream_web.h
+            src/audio/backend/web/audio_web.cpp
+            src/audio/backend/web/stream_web.cpp)
 else()
     set(DRIVERS_CUBEB_SRC
             include/drivers/audio/backend/cubeb/audio_cubeb.h
@@ -60,7 +67,8 @@ set(DRIVERS_OGL_SRC
         src/graphics/backend/ogl/pvrt-dec.cpp
         src/graphics/backend/ogl/texture_ogl.cpp
         src/graphics/backend/ogl/shader_ogl.cpp)
-if (EKA2L1_IOS)
+if (EKA2L1_IOS OR EKA2L1_WEB)
+    # Both link GLES3 symbols directly (OpenGLES.framework / WebGL2) instead of glad.
     list(APPEND DRIVERS_OGL_SRC
         include/drivers/graphics/backend/ogl/ios_gl_loader.h)
 endif ()
@@ -131,6 +139,7 @@ add_library(drivers
         ${DRIVERS_FFMPEG_SRC}
         ${DRIVERS_HWRM_IOS_SRC}
         ${DRIVERS_OGL_SRC}
+        ${DRIVERS_WEB_SRC}
         ${DRIVERS_VULKAN_SRC})
 if (ANDROID)
     target_sources(drivers PRIVATE
@@ -163,6 +172,8 @@ elseif (EKA2L1_IOS)
         include/drivers/sensor/backend/ios/controller_motion.h
         include/drivers/sensor/backend/ios/motion_override.h
         src/sensor/backend/ios/sensor_ios.mm)
+elseif (EKA2L1_WEB)
+    # Window, input and gamepads are provided by the web frontend (no SDL2).
 else()
     target_sources(drivers PRIVATE
         include/drivers/input/backend/emu_controller_sdl2.h
@@ -226,6 +237,12 @@ elseif(ANDROID)
         src/graphics/backend/context_egl_android.cpp
         src/graphics/backend/context_egl_android.h
     )
+elseif(EKA2L1_WEB)
+    # WebGL2 context on the page's (offscreen) canvas.
+    target_sources(drivers PRIVATE
+        src/graphics/backend/context_web.cpp
+        src/graphics/backend/context_web.h
+    )
 else()
     find_package(X11 REQUIRED)
     find_package(OpenGL REQUIRED)
@@ -266,6 +283,9 @@ elseif (WIN32)
     target_link_libraries(drivers PRIVATE crypt32)
 elseif (ANDROID)
     target_sources(drivers PRIVATE src/network/tls_trust_android.cpp)
+elseif (EKA2L1_WEB)
+    # No host trust store is reachable from a page; guest TLS has no roots.
+    target_sources(drivers PRIVATE src/network/tls_trust_web.cpp)
 else()
     find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Network)
     find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Network)
@@ -293,7 +313,7 @@ if (EKA2L1_IOS)
         "-framework CoreVideo"
         "-framework CoreGraphics"
         "-framework ImageIO")
-else()
+elseif (NOT EKA2L1_WEB)
     target_link_libraries(drivers PRIVATE cubeb glad)
 endif()
 if (EKA2L1_HAVE_FFMPEG)
@@ -302,7 +322,7 @@ if (EKA2L1_HAVE_FFMPEG)
 endif()
 if (ANDROID)
     target_link_libraries(drivers PRIVATE android)
-elseif (NOT EKA2L1_IOS)
+elseif (NOT EKA2L1_IOS AND NOT EKA2L1_WEB)
     target_link_libraries(drivers PRIVATE SDL2)
 endif()
 

@@ -30,6 +30,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace eka2l1::common {
@@ -78,8 +79,12 @@ namespace eka2l1::common {
                 return *this;
             }
 
-            bool operator!=(const iterator &ite) {
+            bool operator!=(const iterator &ite) const {
                 return ite_ != ite.ite_;
+            }
+
+            bool operator==(const iterator &ite) const {
+                return ite_ == ite.ite_;
             }
 
             T &operator*() {

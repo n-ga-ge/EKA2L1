@@ -88,6 +88,35 @@ if (EKA2L1_IOS)
     message(STATUS "iOS build: tools/tests/vulkan/patch/dmg/discord forced OFF; scripting is native-patch only (no LuaJIT)")
 endif()
 
+# Web (Emscripten) port. Like iOS, the browser cannot map executable memory, so
+# no JIT (dynarmic, LuaJIT) is compiled in and the dyncom interpreter is the only
+# CPU core. Options the port does not support are overridden silently.
+if (EMSCRIPTEN)
+    set(EKA2L1_WEB ON)
+    add_compile_definitions(EKA2L1_WEB=1)
+    set(EKA2L1_BUILD_TOOLS OFF CACHE BOOL "Disabled on web" FORCE)
+    set(EKA2L1_BUILD_TESTS OFF CACHE BOOL "Disabled on web" FORCE)
+    set(EKA2L1_ENABLE_SCRIPTING_ABILITY ON CACHE BOOL "Native patches only on web" FORCE)
+    set(EKA2L1_SCRIPTING_LUA OFF CACHE BOOL "No LuaJIT on web" FORCE)
+    set(EKA2L1_BUILD_VULKAN_BACKEND OFF CACHE BOOL "Disabled on web" FORCE)
+    set(EKA2L1_BUILD_PATCH OFF CACHE BOOL "Disabled on web" FORCE)
+    set(EKA2L1_DEPLOY_DMG OFF CACHE BOOL "Disabled on web" FORCE)
+    set(EKA2L1_ENABLE_DISCORD_RICH_PRESENCE OFF CACHE BOOL "Disabled on web" FORCE)
+    set(EKA2L1_ENABLE_QT_CAMERA OFF CACHE BOOL "Disabled on web" FORCE)
+    set(EKA2L1_CPU_DYNCOM_ONLY ON CACHE BOOL "Interpreter only on web" FORCE)
+    # The emulator runs its OS and graphics loops on their own threads, and
+    # guest-visible errors travel as C++ exceptions.
+    add_compile_options(-pthread -fwasm-exceptions)
+    # The vendored fmt (and a couple of our own files) call malloc/free without
+    # including <cstdlib>; other standard libraries pull it in transitively,
+    # Emscripten's libc++ does not.
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cstdlib>")
+    add_link_options(-pthread -fwasm-exceptions)
+    message(STATUS "Web build: interpreter-only CPU, no LuaJIT/vulkan/tools/tests")
+else()
+    set(EKA2L1_WEB OFF)
+endif()
+
 
 set (CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set (ROOT ${CMAKE_CURRENT_SOURCE_DIR})
