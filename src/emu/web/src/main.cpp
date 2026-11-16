@@ -218,6 +218,24 @@ EMSCRIPTEN_KEEPALIVE double eka2l1_web_frames() {
     return static_cast<double>(state.frames.load());
 }
 
+// Backing size of the canvas in pixels. Applied by the graphics thread with
+// the next frame the guest presents.
+EMSCRIPTEN_KEEPALIVE void eka2l1_web_set_surface_size(int width, int height) {
+    state.wanted_height = height;
+    state.wanted_width = width;
+}
+
+// Chooses how the guest screen is scaled to the canvas: an empty name for
+// plain texture filtering (nearest or linear, per the nearestNeighborFiltering
+// config key), otherwise the name of a shader in resources/upscale.
+EMSCRIPTEN_KEEPALIVE void eka2l1_web_set_upscale_shader(const char *name) {
+    {
+        const std::lock_guard<std::mutex> guard(state.wanted_shader_lock);
+        state.wanted_shader = name ? name : "";
+    }
+    state.wanted_shader_pending = true;
+}
+
 // Microseconds the graphics thread has spent executing draw commands so far.
 EMSCRIPTEN_KEEPALIVE double eka2l1_web_graphics_busy_us() {
     return static_cast<double>(drivers::web_graphics_busy_us.load());

@@ -3,31 +3,13 @@
 //
 // Input for the EKA2L1 web page: keyboard, on-screen touch controls and
 // gamepads all feed one key state, so a key held by two sources at once is
-// only released when both let go.
+// only released when both let go. Which host input presses which N-Gage key
+// comes from a bindings table (see games.js) that can be replaced at any time.
 
 import { KEYS } from './eka2l1-client.js';
 
-// Keyboard to N-Gage keys.
-export const KEYMAP = {
-  ArrowUp: KEYS.up, ArrowDown: KEYS.down, ArrowLeft: KEYS.left, ArrowRight: KEYS.right,
-  Enter: KEYS.ok, Space: KEYS.ok, KeyQ: KEYS.lsk, KeyW: KEYS.rsk, Backspace: KEYS.clear,
-  Minus: KEYS.star, Equal: KEYS.hash, KeyC: KEYS.call, KeyE: KEYS.end,
-  Digit0: KEYS[0], Digit1: KEYS[1], Digit2: KEYS[2], Digit3: KEYS[3], Digit4: KEYS[4],
-  Digit5: KEYS[5], Digit6: KEYS[6], Digit7: KEYS[7], Digit8: KEYS[8], Digit9: KEYS[9],
-  Numpad0: KEYS[0], Numpad1: KEYS[1], Numpad2: KEYS[2], Numpad3: KEYS[3], Numpad4: KEYS[4],
-  Numpad5: KEYS[5], Numpad6: KEYS[6], Numpad7: KEYS[7], Numpad8: KEYS[8], Numpad9: KEYS[9],
-};
-
-// Standard-mapping gamepad buttons to N-Gage keys. The N-Gage's two game keys
-// are 5 and 7; the face buttons cover those plus OK and clear.
-export const PADMAP = {
-  0: KEYS.ok, 1: KEYS.clear, 2: KEYS[5], 3: KEYS[7],
-  4: KEYS.lsk, 5: KEYS.rsk, 6: KEYS.star, 7: KEYS.hash,
-  8: KEYS.rsk, 9: KEYS.lsk,
-  12: KEYS.up, 13: KEYS.down, 14: KEYS.left, 15: KEYS.right,
-};
-
 const STICK_THRESHOLD = 0.5;
+const PAD_POLL_MS = 8;
 
 // Keeps a touch bound to the control it started on. Capture can be refused
 // (the pointer may already be gone), which only costs the binding.
@@ -35,18 +17,50 @@ function capture(element, pointerId) {
   try { element.setPointerCapture(pointerId); } catch { /* not capturable */ }
 }
 
+// Is this gamepad input ("b3", "a0-", "a2+") active on the pad?
+function padInputActive(pad, input) {
+  if (input[0] === 'b') {
+    const button = pad.buttons[Number(input.slice(1))];
+    return Boolean(button && (button.pressed || button.value > 0.5));
+  }
+  const value = pad.axes[Number(input.slice(1, -1))] || 0;
+  return input.endsWith('-') ? value < -STICK_THRESHOLD : value > STICK_THRESHOLD;
+}
+
 export class Input {
   // `send(scancode, down)` delivers a key transition to the emulator.
   constructor(send) {
     this.send = send;
     this.holders = new Map(); // scancode -> Set of source ids
-    this.padHeld = new Map(); // gamepad index -> Set of scancodes
-    this.padTimer = 0;
+    this.keyboard = new Map(); // KeyboardEvent.code -> [N-Gage key ids]
+    this.gamepad = []; // [{ input, key }]
+    this.padHeld = new Map(); // gamepad index -> Set of N-Gage key ids
+    this.padCount = 0;
     this.onGamepadChange = null;
+    this.capturing = null; // { kind, resolve } while a binding is being recorded
     this.sent = 0;
   }
 
-  press(source, scancode) {
+  // bindings: { keyboard: { ngageKey: [codes] }, gamepad: { ngageKey: [inputs] } }
+  setBindings(bindings) {
+    this.releaseAll();
+    this.keyboard = new Map();
+    for (const [key, codes] of Object.entries(bindings.keyboard || {})) {
+      for (const code of codes) {
+        if (!this.keyboard.has(code)) this.keyboard.set(code, []);
+        this.keyboard.get(code).push(key);
+      }
+    }
+    this.gamepad = [];
+    for (const [key, inputs] of Object.entries(bindings.gamepad || {})) {
+      for (const input of inputs) this.gamepad.push({ input, key });
+    }
+    this.padHeld = new Map();
+  }
+
+  press(source, key) {
+    const scancode = KEYS[key];
+    if (scancode === undefined) return;
     let sources = this.holders.get(scancode);
     if (!sources) {
       sources = new Set();
@@ -60,7 +74,8 @@ export class Input {
     }
   }
 
-  release(source, scancode) {
+  release(source, key) {
+    const scancode = KEYS[key];
     const sources = this.holders.get(scancode);
     if (!sources || !sources.delete(source)) return;
     if (sources.size === 0) {
@@ -69,14 +84,28 @@ export class Input {
     }
   }
 
-  releaseSource(source) {
-    for (const scancode of Array.from(this.holders.keys())) this.release(source, scancode);
-  }
-
   releaseAll() {
     for (const [scancode, sources] of this.holders) {
       if (sources.size) this.send(scancode, false);
       sources.clear();
+    }
+    this.padHeld = new Map();
+  }
+
+  // Resolves with the next keyboard code ('keyboard') or gamepad input
+  // ('gamepad') the user produces, or null if cancelled with Escape or by
+  // calling cancelCapture(). Nothing reaches the emulator meanwhile.
+  captureNext(kind) {
+    this.cancelCapture();
+    this.releaseAll();
+    return new Promise((resolve) => { this.capturing = { kind, resolve, baseline: null }; });
+  }
+
+  cancelCapture() {
+    if (this.capturing) {
+      const { resolve } = this.capturing;
+      this.capturing = null;
+      resolve(null);
     }
   }
 
@@ -84,41 +113,59 @@ export class Input {
 
   attachKeyboard(target = window) {
     const onKey = (down) => (event) => {
-      const scancode = KEYMAP[event.code];
-      if (scancode === undefined || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (this.capturing) {
+        if (!down) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const capturing = this.capturing;
+        if (event.code === 'Escape' || capturing.kind === 'keyboard') {
+          this.capturing = null;
+          capturing.resolve(event.code === 'Escape' && capturing.kind !== 'keyboard' ? null : event.code);
+        }
+        return;
+      }
+
+      const keys = this.keyboard.get(event.code);
+      if (!keys || event.ctrlKey || event.metaKey || event.altKey) return;
+      const element = event.target;
+      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) return;
+      if (document.querySelector('dialog[open]')) return; // typing in a dialog is not for the game
       event.preventDefault();
-      if (down) this.press('keyboard:' + event.code, scancode);
-      else this.release('keyboard:' + event.code, scancode);
+      for (const key of keys) {
+        if (down) this.press('keyboard:' + event.code, key);
+        else this.release('keyboard:' + event.code, key);
+      }
     };
 
-    target.addEventListener('keydown', onKey(true));
-    target.addEventListener('keyup', onKey(false));
+    target.addEventListener('keydown', onKey(true), true);
+    target.addEventListener('keyup', onKey(false), true);
     // Keys released while the page is not focused never produce a keyup.
     window.addEventListener('blur', () => {
-      for (const code of Object.keys(KEYMAP)) this.release('keyboard:' + code, KEYMAP[code]);
+      for (const [code, keys] of this.keyboard) {
+        for (const key of keys) this.release('keyboard:' + code, key);
+      }
     });
   }
 
   // --- touch --------------------------------------------------------------
 
-  // Buttons: any element with data-key="<name in KEYS>".
+  // Buttons: any element with data-key="<N-Gage key id>".
   attachButtons(root) {
     for (const element of root.querySelectorAll('[data-key]')) {
-      const scancode = KEYS[element.dataset.key];
-      if (scancode === undefined) continue;
-      const source = 'touch:' + element.dataset.key;
+      const key = element.dataset.key;
+      if (KEYS[key] === undefined) continue;
+      const source = 'touch:' + key;
 
       const down = (event) => {
         event.preventDefault();
         capture(element, event.pointerId);
         element.classList.add('held');
-        this.press(source, scancode);
+        this.press(source, key);
       };
       const up = (event) => {
         event.preventDefault();
         element.classList.remove('held');
-        this.release(source, scancode);
+        this.release(source, key);
       };
 
       element.addEventListener('pointerdown', down);
@@ -132,7 +179,7 @@ export class Input {
   // Direction pad: one element; the touch position relative to its centre
   // picks up to two directions, so diagonals and sliding between them work.
   attachDpad(element) {
-    const directions = { up: KEYS.up, down: KEYS.down, left: KEYS.left, right: KEYS.right };
+    const directions = ['up', 'down', 'left', 'right'];
     let active = null;
 
     const update = (event) => {
@@ -152,9 +199,9 @@ export class Input {
         if (near(Math.PI / 2)) want.add('down');
       }
 
-      for (const name of Object.keys(directions)) {
-        if (want.has(name)) this.press('dpad', directions[name]);
-        else this.release('dpad', directions[name]);
+      for (const name of directions) {
+        if (want.has(name)) this.press('dpad', name);
+        else this.release('dpad', name);
         element.classList.toggle('held-' + name, want.has(name));
       }
     };
@@ -162,8 +209,8 @@ export class Input {
     const end = (event) => {
       if (active !== event.pointerId) return;
       active = null;
-      for (const name of Object.keys(directions)) {
-        this.release('dpad', directions[name]);
+      for (const name of directions) {
+        this.release('dpad', name);
         element.classList.remove('held-' + name);
       }
     };
@@ -188,44 +235,61 @@ export class Input {
   attachGamepads() {
     if (typeof navigator.getGamepads !== 'function') return;
 
+    const allInputs = [];
+    for (let button = 0; button < 17; button++) allInputs.push('b' + button);
+    for (let axis = 0; axis < 4; axis++) allInputs.push(`a${axis}-`, `a${axis}+`);
+
     const poll = () => {
       const pads = navigator.getGamepads();
       let connected = 0;
 
       for (let index = 0; index < pads.length; index++) {
         const pad = pads[index];
+        const live = Boolean(pad && pad.connected);
+        if (live) connected++;
+
+        if (this.capturing) {
+          // Record the first input that becomes active after capture began.
+          if (live && this.capturing.kind === 'gamepad') {
+            const active = allInputs.filter((input) => padInputActive(pad, input));
+            const capturing = this.capturing;
+            if (capturing.baseline === null) {
+              capturing.baseline = new Set(active);
+            } else {
+              const fresh = active.find((input) => !capturing.baseline.has(input));
+              capturing.baseline = new Set(active);
+              if (fresh) {
+                this.capturing = null;
+                capturing.resolve(fresh);
+              }
+            }
+          }
+          continue;
+        }
+
         const source = 'gamepad:' + index;
         const want = new Set();
-
-        if (pad && pad.connected) {
-          connected++;
-          for (const [button, scancode] of Object.entries(PADMAP)) {
-            const state = pad.buttons[button];
-            if (state && (state.pressed || state.value > 0.5)) want.add(scancode);
+        if (live) {
+          for (const { input, key } of this.gamepad) {
+            if (padInputActive(pad, input)) want.add(key);
           }
-          const [x = 0, y = 0] = pad.axes;
-          if (x < -STICK_THRESHOLD) want.add(KEYS.left);
-          if (x > STICK_THRESHOLD) want.add(KEYS.right);
-          if (y < -STICK_THRESHOLD) want.add(KEYS.up);
-          if (y > STICK_THRESHOLD) want.add(KEYS.down);
         }
 
         const held = this.padHeld.get(index) || new Set();
-        for (const scancode of want) if (!held.has(scancode)) this.press(source, scancode);
-        for (const scancode of held) if (!want.has(scancode)) this.release(source, scancode);
+        for (const key of want) if (!held.has(key)) this.press(source, key);
+        for (const key of held) if (!want.has(key)) this.release(source, key);
         this.padHeld.set(index, want);
       }
 
-      if (this.onGamepadChange && connected !== this.padCount) {
+      if (connected !== this.padCount) {
         this.padCount = connected;
-        this.onGamepadChange(connected);
+        if (this.onGamepadChange) this.onGamepadChange(connected);
       }
     };
 
     // A timer rather than requestAnimationFrame: input must keep flowing at a
     // steady rate regardless of how often the page repaints.
-    this.padCount = 0;
-    this.padTimer = setInterval(poll, 8);
+    setInterval(poll, PAD_POLL_MS);
     window.addEventListener('gamepadconnected', poll);
     window.addEventListener('gamepaddisconnected', poll);
   }

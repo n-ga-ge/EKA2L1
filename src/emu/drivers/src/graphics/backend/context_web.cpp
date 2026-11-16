@@ -26,9 +26,13 @@ namespace eka2l1::drivers::graphics {
         attrs.premultipliedAlpha = false;
         attrs.preserveDrawingBuffer = false;
         // Frames are shown when the graphics thread returns to its event loop
-        // (see ogl_graphics_driver::run), which is the only way a browser
-        // presents an OffscreenCanvas.
-        attrs.explicitSwapControl = false;
+        // (see ogl_graphics_driver::run), which is how a browser presents an
+        // OffscreenCanvas. Explicit swap control is requested only to keep
+        // Emscripten from "helping": with implicit swap its main loop calls the
+        // context's legacy commit() before every iteration, which Firefox
+        // still implements and which pushes the just-cleared buffer, leaving
+        // the canvas blank there. We never call commit ourselves.
+        attrs.explicitSwapControl = true;
         attrs.renderViaOffscreenBackBuffer = false;
 
         handle_ = static_cast<int>(emscripten_webgl_create_context(target, &attrs));

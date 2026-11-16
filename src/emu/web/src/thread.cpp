@@ -8,6 +8,7 @@
 #include <drivers/graphics/graphics.h>
 #include <system/devices.h>
 
+#include <emscripten.h>
 #include <emscripten/html5.h>
 #include <emscripten/threading.h>
 #include <pthread.h>
@@ -34,9 +35,78 @@ namespace eka2l1::web {
 
         state.graphics_driver->set_display_hook([&state]() {
             state.frames.fetch_add(1, std::memory_order_relaxed);
+
+            // Resize requests from the page are applied here, on the thread
+            // that owns the canvas, and take effect with the next frame.
+            const int width = state.wanted_width.exchange(0);
+            const int height = state.wanted_height.exchange(0);
+            if (width > 0 && height > 0 && (width != state.surface_size.x || height != state.surface_size.y)) {
+                emscripten_set_canvas_element_size(state.canvas_selector.c_str(), width, height);
+                state.surface_size = eka2l1::vec2(width, height);
+                state.graphics_driver->update_surface_size(state.surface_size);
+            }
+
+            if (state.wanted_shader_pending.exchange(false)) {
+                std::string shader;
+                {
+                    const std::lock_guard<std::mutex> guard(state.wanted_shader_lock);
+                    shader = state.wanted_shader;
+                }
+                if (!shader.empty()) {
+                    state.graphics_driver->set_upscale_shader(shader);
+                }
+                state.use_upscale_shader = !shader.empty();
+            }
         });
 
         state.has_surface = (width > 0) && (height > 0);
+        EM_ASM({ // TMPDBG
+            const g = GL.currentContext.GLctx;
+            let trace = [];
+            let ticks = 0;
+            const skip = new Set(['getError', 'isContextLost', 'getParameter']);
+            let inTail = false;
+            const off = new Set();
+            new BroadcastChannel('tmpdbg').onmessage = (e) => { off.add(e.data); };
+            for (const name of Object.getOwnPropertyNames(Object.getPrototypeOf(g))) {
+                let value;
+                try { value = g[name]; } catch (e) { continue; }
+                if (typeof value !== 'function' || skip.has(name)) continue;
+                const orig = value.bind(g);
+                g[name] = (...a) => {
+                    if (off.has(name) || (off.has('ALL') && !inTail)) return name === 'checkFramebufferStatus' ? 0x8CD5 : name.startsWith('get') ? 1 : undefined;
+                    let note = name;
+                    if (name === 'bindFramebuffer') note += a[1] ? '(obj)' : '(null)';
+                    if (name === 'texImage2D' || name === 'texStorage2D' || name === 'renderbufferStorage') note += '(' + a.slice(1, 6).filter((v) => typeof v === 'number').join(',') + ')';
+                    if (name === 'framebufferTexture2D' || name === 'framebufferRenderbuffer') note += '(' + a[1] + ')';
+                    trace.push(note);
+                    return orig(...a);
+                };
+            }
+            const origRaf = globalThis.requestAnimationFrame.bind(globalThis);
+            let reported = 0;
+            globalThis.requestAnimationFrame = (cb) => origRaf((t) => {
+                trace = [];
+                try { cb(t); } catch (e) { if (e !== 'unwind') console.warn('TMPDBG cb threw ' + e); }
+                if ((ticks % 40) === 0 || (ticks > 230 && ticks < 250)) console.warn('TMPDBG status tick=' + ticks + ' canvas=' + g.canvas.width + 'x' + g.canvas.height + ' buf=' + g.drawingBufferWidth + 'x' + g.drawingBufferHeight + ' lost=' + g.isContextLost() + ' t=' + Math.round(performance.now()));
+                const lost = g.isContextLost();
+                const err = g.getError();
+                inTail = true;
+                g.disable(g.SCISSOR_TEST);
+                g.bindFramebuffer(g.FRAMEBUFFER, null);
+                g.colorMask(true, true, true, true);
+                g.clearColor(1, 0, 1, 1);
+                g.clear(g.COLOR_BUFFER_BIT);
+                inTail = false;
+                ticks++;
+                if (trace.length > 6 && reported < 14) {
+                    reported++;
+                    const counts = {};
+                    for (const item of trace.slice(0, -6)) counts[item] = (counts[item] || 0) + 1;
+                    console.warn('TMPDBG tick ' + ticks + ' lost=' + lost + ' err=' + err + ': ' + Object.entries(counts).map(([k, v]) => k + (v > 1 ? 'x' + v : '')).join(' ').slice(0, reported === 1 ? 3500 : 200));
+                }
+            });
+        });
         LOG_INFO(FRONTEND_CMDLINE, "Graphics thread ready, surface {}x{}", width, height);
 
         state.graphics_init_done.set();

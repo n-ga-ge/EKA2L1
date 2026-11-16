@@ -64,6 +64,19 @@ namespace eka2l1::web {
         std::string canvas_selector;
         eka2l1::vec2 surface_size{ 0, 0 };
 
+        // Size the page asked for; the graphics thread, which owns the canvas,
+        // applies it before the next present. Zero means no request.
+        std::atomic<int> wanted_width{ 0 };
+        std::atomic<int> wanted_height{ 0 };
+
+        // Draw the guest screen through the driver's upscale shader instead of
+        // plain nearest/linear filtering. The page's choice is handed to the
+        // graphics thread the same way as the size.
+        std::atomic<bool> use_upscale_shader{ false };
+        std::mutex wanted_shader_lock;
+        std::string wanted_shader;
+        std::atomic<bool> wanted_shader_pending{ false };
+
         std::unique_ptr<std::thread> os_thread;
 
         // Serializes control requests with boot/launch/close.

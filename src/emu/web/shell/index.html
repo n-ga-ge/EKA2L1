@@ -14,51 +14,125 @@
   <header id="bar">
     <div id="status" role="status" aria-live="polite">Loading…</div>
     <div id="actions">
-      <button id="btn-pause" type="button" title="Pause" disabled>Pause</button>
-      <button id="btn-restart" type="button" title="Restart the game" disabled>Restart</button>
-      <button id="btn-mute" type="button" title="Mute" disabled>Mute</button>
-      <button id="btn-keypad" type="button" title="Show the number keys" class="touch-only">123</button>
-      <button id="btn-fullscreen" type="button" title="Fullscreen">Full</button>
-      <button id="btn-info" type="button" title="Diagnostics">Info</button>
+      <button id="btn-pause" type="button" disabled>Pause</button>
+      <button id="btn-menu" type="button">Menu</button>
     </div>
   </header>
 
   <main id="console">
     <div class="pad pad-left touch-only" aria-label="Direction controls">
-      <button type="button" class="key soft" data-key="lsk">◧</button>
-      <div id="dpad" class="dpad"><span></span></div>
+      <button type="button" class="key soft" data-key="lsk" aria-label="Left soft key">◧</button>
+      <div id="dpad" class="dpad" aria-label="Direction pad"><span></span></div>
+      <div class="pad-row">
+        <button type="button" class="key round primary" data-key="ok">OK</button>
+        <button type="button" class="key round" data-key="clear">C</button>
+      </div>
     </div>
 
     <div id="stage">
       <canvas id="canvas" width="528" height="624" tabindex="0"></canvas>
       <div id="overlay" hidden></div>
+
+      <form id="setup" hidden>
+        <h2 id="setup-title">Load a game</h2>
+        <p id="setup-note"></p>
+        <button id="btn-play" type="button" class="primary" hidden></button>
+        <fieldset>
+          <legend>From URLs</legend>
+          <label id="fw-url-row">Firmware (ROM dump) <input id="fw-url" type="url" inputmode="url" placeholder="https://…/NGAGE.ROM" autocomplete="off"></label>
+          <label>Game card dump (.zip) <input id="game-url" type="url" inputmode="url" placeholder="https://…/game.zip" autocomplete="off"></label>
+          <button id="btn-load-url" type="button" class="primary">Load from URL</button>
+        </fieldset>
+        <fieldset>
+          <legend>From this device</legend>
+          <label id="fw-row">Firmware (ROM dump) <input id="fw-file" type="file"></label>
+          <label>Game card dump (.zip) <input id="game-file" type="file" accept=".zip,.7z,.rar"></label>
+          <button id="btn-load-files" type="submit">Load files</button>
+        </fieldset>
+      </form>
     </div>
 
-    <div class="pad pad-right touch-only" aria-label="Action controls">
-      <button type="button" class="key soft" data-key="rsk">◨</button>
-      <div class="actions-cluster">
-        <button type="button" class="key round" data-key="7">7</button>
-        <button type="button" class="key round primary" data-key="ok">OK</button>
-        <button type="button" class="key round" data-key="5">5</button>
-        <button type="button" class="key round" data-key="clear">C</button>
+    <div class="pad pad-right touch-only" aria-label="Keypad">
+      <button type="button" class="key soft" data-key="rsk" aria-label="Right soft key">◨</button>
+      <div id="keypad">
+        <button type="button" class="key" data-key="1"><b>1</b><small></small></button><button type="button" class="key" data-key="2"><b>2</b><small></small></button><button type="button" class="key" data-key="3"><b>3</b><small></small></button>
+        <button type="button" class="key" data-key="4"><b>4</b><small></small></button><button type="button" class="key" data-key="5"><b>5</b><small></small></button><button type="button" class="key" data-key="6"><b>6</b><small></small></button>
+        <button type="button" class="key" data-key="7"><b>7</b><small></small></button><button type="button" class="key" data-key="8"><b>8</b><small></small></button><button type="button" class="key" data-key="9"><b>9</b><small></small></button>
+        <button type="button" class="key" data-key="star"><b>✱</b><small></small></button><button type="button" class="key" data-key="0"><b>0</b><small></small></button><button type="button" class="key" data-key="hash"><b>#</b><small></small></button>
       </div>
     </div>
   </main>
 
-  <div id="keypad" class="touch-only" hidden>
-    <button type="button" class="key" data-key="1">1</button><button type="button" class="key" data-key="2">2</button><button type="button" class="key" data-key="3">3</button>
-    <button type="button" class="key" data-key="4">4</button><button type="button" class="key" data-key="5">5</button><button type="button" class="key" data-key="6">6</button>
-    <button type="button" class="key" data-key="7">7</button><button type="button" class="key" data-key="8">8</button><button type="button" class="key" data-key="9">9</button>
-    <button type="button" class="key" data-key="star">✱</button><button type="button" class="key" data-key="0">0</button><button type="button" class="key" data-key="hash">#</button>
-  </div>
+  <p id="help" class="desktop-only"></p>
 
-  <form id="setup" hidden>
-    <label id="fw-row">N-Gage firmware (ROM dump) <input id="fw-file" type="file"></label>
-    <label>Game card dump (.zip) <input id="game-file" type="file" accept=".zip,.7z,.rar"></label>
-    <button id="start" type="submit">Start</button>
-  </form>
+  <dialog id="menu">
+    <h2>Menu</h2>
+    <div class="menu-grid">
+      <button type="button" id="m-restart" disabled>Restart game</button>
+      <button type="button" id="m-mute" disabled>Mute</button>
+      <button type="button" id="m-fullscreen">Fullscreen</button>
+      <button type="button" id="m-controls">Controls…</button>
+      <button type="button" id="m-display">Display…</button>
+      <button type="button" id="m-saves" disabled>Saves…</button>
+      <button type="button" id="m-load">Load a game…</button>
+      <button type="button" id="m-link" disabled>Copy link to this game</button>
+      <button type="button" id="m-guide">Guide</button>
+      <button type="button" id="m-info">Diagnostics</button>
+    </div>
+    <form method="dialog"><button type="submit">Close</button></form>
+  </dialog>
 
-  <p id="help" class="desktop-only">Arrows move · <kbd>Enter</kbd> OK · <kbd>Q</kbd>/<kbd>W</kbd> soft keys · <kbd>0</kbd>–<kbd>9</kbd> keypad · <kbd>-</kbd> ✱ · <kbd>=</kbd> # · <kbd>Backspace</kbd> clear · gamepads supported</p>
+  <dialog id="controls">
+    <h2>Controls</h2>
+    <label class="row">Layout
+      <select id="profile-select"></select>
+    </label>
+    <p class="hint" id="controls-hint"></p>
+    <div class="table-wrap"><table id="bindings">
+      <thead><tr><th>N-Gage key</th><th>In this game</th><th>Keyboard</th><th>Gamepad</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <p class="hint">Click <b>+</b> and press a key or gamepad button to add it. Click a binding to remove it.</p>
+    <form method="dialog">
+      <button type="button" id="controls-reset">Reset this layout</button>
+      <button type="submit">Close</button>
+    </form>
+  </dialog>
+
+  <dialog id="display">
+    <h2>Display</h2>
+    <label class="row">Scaling
+      <select id="filter-select"></select>
+    </label>
+    <p class="hint" id="filter-hint"></p>
+    <label class="row">Resolution
+      <select id="resolution-select"></select>
+    </label>
+    <p class="hint" id="resolution-hint"></p>
+    <form method="dialog"><button type="submit">Close</button></form>
+  </dialog>
+
+  <dialog id="saves">
+    <h2>Saves</h2>
+    <p class="hint">Games keep their saves and settings in the phone's memory under <code>C:\System\Apps</code>. Export downloads all of it as a .zip; import puts a .zip back and replaces files with the same name.</p>
+    <div class="table-wrap"><table id="save-list">
+      <thead><tr><th>File</th><th>Size</th><th>Changed</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <p class="hint" id="saves-status"></p>
+    <input id="save-import-file" type="file" accept=".zip" hidden>
+    <form method="dialog">
+      <button type="button" id="saves-export">Export (.zip)</button>
+      <button type="button" id="saves-import">Import (.zip)…</button>
+      <button type="submit">Close</button>
+    </form>
+  </dialog>
+
+  <dialog id="guide">
+    <h2>Guide</h2>
+    <div id="guide-body"></div>
+    <form method="dialog"><button type="submit">Close</button></form>
+  </dialog>
 
   <dialog id="info">
     <h2>Diagnostics</h2>

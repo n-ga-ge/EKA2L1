@@ -117,7 +117,7 @@ namespace eka2l1::web {
             src.size *= scr->display_scale_factor;
 
             std::uint32_t flags = 0;
-            if (scr->flags_ & epoc::screen::FLAG_SCREEN_UPSCALE_FACTOR_LOCK) {
+            if (use_upscale_shader || (scr->flags_ & epoc::screen::FLAG_SCREEN_UPSCALE_FACTOR_LOCK)) {
                 flags |= drivers::bitmap_draw_flag_use_upscale_shader;
             }
 

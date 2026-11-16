@@ -1,24 +1,34 @@
 // Copyright (c) 2026 EKA2L1 Team.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Page logic: checks what the browser supports, boots the emulator, installs
-// the firmware and game it is given (by URL parameters or file pickers) and
-// wires up input, audio and the session controls.
+// Page logic: checks what the browser supports, boots the emulator, loads the
+// firmware and game it is given, and wires up input, display options, saves
+// and the session controls.
 //
-//   ?fw=<url>     N-Gage firmware ROM dump to install when no device exists yet
-//   ?game=<url>   game card dump (.zip/.7z/.rar) to install and launch
+// A game can be loaded three ways:
+//   - URL parameters, for links that start the game by themselves:
+//       ?fw=<url>     N-Gage firmware ROM dump (needed once; it is kept)
+//       ?game=<url>   game card dump (.zip/.7z/.rar)
+//   - the "Load from URL" button, which takes the same two URLs and puts them
+//     in the address bar so the page can be bookmarked or shared
+//   - files picked from this device
+// A site can ship a config.json next to this page ({ "title", "fw", "game" })
+// to offer one-click "Play <title>".
+//
+// Other parameters:
 //   ?log=<filter> emulator log filter (default *:warn), e.g. *:info
-//   ?persist=0    keep nothing between visits (default: firmware, games and
-//                 saves are stored in this origin's private file system)
-//   ?touch=1|0    force the on-screen controls on or off (default: shown on
-//                 touch screens)
+//   ?persist=0    keep nothing between visits
+//   ?touch=1|0    force the on-screen controls on or off
 //   ?fps=1        show frames per second in the status line
 //
 // Firmware and game are fetched with CORS, so their server must allow this
 // origin.
 
 import { Eka2l1 } from './eka2l1-client.js';
+import { GAME_PROFILES, NGAGE_KEYS, STANDARD_PROFILE, keyName, padName, profileFor } from './games.js';
 import { Input } from './input.js';
+import { downloadBlob, exportFileName, exportSaves, importSaves, listSaves } from './saves.js';
+import { saveSettings, settings } from './settings.js';
 import { detectSupport } from './support.js';
 
 const params = new URLSearchParams(location.search);
@@ -33,10 +43,15 @@ const page = {
   emu: null,
   input: null,
   support: null,
+  site: null, // config.json, when the host provides one
   app: null, // { uid, name } of the running game
+  source: null, // { fw, game } URLs the running game came from
+  screen: { width: 176, height: 208 },
   paused: false,
   userPaused: false,
   muted: false,
+  gamepads: 0,
+  fps: 0,
 };
 window.eka2l1Page = page; // for the console and automated tests
 
@@ -45,14 +60,37 @@ function setStatus(text, isError = false) {
   statusEl.classList.toggle('error', isError);
 }
 
+function reportError(error) {
+  console.error(error);
+  setStatus(String(error && error.message ? error.message : error), true);
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+}
+
 // --- downloads and installs ----------------------------------------------------
 
-async function fetchBytes(url, label) {
-  if (!/^https?:$/.test(new URL(url, location.href).protocol)) {
-    throw new Error(`${label}: only http(s) URLs are allowed`);
+function checkedUrl(url, label) {
+  let parsed;
+  try {
+    parsed = new URL(url, location.href);
+  } catch {
+    throw new Error(`${label}: "${url}" is not a URL`);
   }
+  if (!/^https?:$/.test(parsed.protocol)) throw new Error(`${label}: only http(s) URLs are allowed`);
+  return parsed;
+}
 
-  const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
+async function fetchBytes(url, label) {
+  const target = checkedUrl(url, label);
+
+  let response;
+  try {
+    response = await fetch(target, { mode: 'cors', credentials: 'omit' });
+  } catch {
+    throw new Error(`${label}: could not download ${target.host}${target.pathname}. The server must be reachable and allow this site (CORS).`);
+  }
   if (!response.ok) throw new Error(`${label}: download failed (${response.status})`);
 
   const total = Number(response.headers.get('Content-Length')) || 0;
@@ -74,34 +112,45 @@ async function fetchBytes(url, label) {
   return bytes;
 }
 
-async function installFirmware(emu, bytes) {
-  setStatus('Installing firmware…');
-  const path = await emu.upload('firmware.rom', bytes);
-  await emu.call('POST', '/v1/devices', { rom: path });
-  await emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/firmware.rom')}`);
+async function hasDevice() {
+  return (await page.emu.call('GET', '/v1/devices')).devices.length > 0;
 }
 
-async function launch(emu, app) {
+async function installFirmware(bytes) {
+  setStatus('Installing firmware…');
+  const path = await page.emu.upload('firmware.rom', bytes);
+  await page.emu.call('POST', '/v1/devices', { rom: path });
+  await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/firmware.rom')}`);
+}
+
+async function launch(app) {
   setStatus(`Starting ${app.name}…`);
-  await emu.call('POST', `/v1/apps/${app.uid}/launch`);
+  await page.emu.call('POST', `/v1/apps/${app.uid}/launch`);
   page.app = app;
   page.paused = false;
   page.userPaused = false;
+  setup.hidden = true;
+
+  const status = await page.emu.call('GET', '/v1/status');
+  if (status.screen && status.screen.width) page.screen = { width: status.screen.width, height: status.screen.height };
+
+  applyBindings();
+  applyDisplay();
   setStatus(app.name);
   refreshControls();
 }
 
-async function installAndLaunch(emu, bytes, name, sourceKey = null) {
+async function installAndLaunch(bytes, name, sourceKey = null) {
   setStatus('Installing game…');
-  const path = await emu.upload(name, bytes);
-  const installed = await emu.call('POST', '/v1/apps', { path, type: 'ngage' });
-  await emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/' + name)}`);
-  const app = installed.added[0] || (await emu.call('GET', '/v1/apps')).apps[0];
+  const path = await page.emu.upload(name, bytes);
+  const installed = await page.emu.call('POST', '/v1/apps', { path, type: 'ngage' });
+  await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/' + name)}`);
+  const app = installed.added[0] || (await page.emu.call('GET', '/v1/apps')).apps[0];
   if (!app) throw new Error('No game was found on the card dump');
 
   if (sourceKey) rememberGame(sourceKey, app.uid);
-  emu.save(); // keep the installed game for the next visit
-  await launch(emu, app);
+  page.emu.save(); // keep the installed game for the next visit
+  await launch(app);
 }
 
 // Which installed game a URL produced, so a repeat visit can skip the download.
@@ -111,7 +160,7 @@ function rememberGame(url, uid) {
   try { localStorage.setItem(gameKey(url), uid); } catch { /* storage disabled */ }
 }
 
-async function findInstalledGame(emu, url) {
+async function findInstalledGame(url) {
   let uid = null;
   try { uid = localStorage.getItem(gameKey(url)); } catch { /* storage disabled */ }
   if (!uid) return null;
@@ -119,7 +168,7 @@ async function findInstalledGame(emu, url) {
   // Right after boot the guest is still scanning its app registries; give it
   // a moment before deciding the game is gone.
   for (let attempt = 0; attempt < 20; attempt++) {
-    const { apps } = await emu.call('GET', '/v1/apps');
+    const { apps } = await page.emu.call('GET', '/v1/apps');
     const found = apps.find((app) => app.uid === uid);
     if (found) return found;
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -127,17 +176,422 @@ async function findInstalledGame(emu, url) {
   return null;
 }
 
-// --- session controls ----------------------------------------------------------
+// Loads firmware (if none is installed yet) and a game from URLs, then starts it.
+async function loadFromUrls(fwUrl, gameUrl) {
+  if (!gameUrl) throw new Error('Enter the URL of a game card dump.');
+  checkedUrl(gameUrl, 'Game');
+
+  const deviceReady = await hasDevice();
+  if (!deviceReady) {
+    if (!fwUrl) throw new Error('Enter the URL of an N-Gage firmware dump too; none is installed yet.');
+    await installFirmware(await fetchBytes(fwUrl, 'Firmware'));
+  }
+
+  const installed = deviceReady ? await findInstalledGame(gameUrl) : null;
+  if (installed) {
+    await launch(installed);
+  } else {
+    const name = new URL(gameUrl, location.href).pathname.split('/').pop() || 'game.zip';
+    await installAndLaunch(await fetchBytes(gameUrl, 'Game'), name, gameUrl);
+  }
+
+  page.source = { fw: fwUrl || '', game: gameUrl };
+  settings.urls = { fw: fwUrl || settings.urls.fw, game: gameUrl };
+  saveSettings();
+
+  overlay.textContent = page.support.mobile ? 'Tap for sound' : 'Click or press a key for sound';
+  overlay.hidden = Boolean(page.emu.audio);
+  refreshControls();
+}
+
+// A link that loads the running game by itself.
+function shareLink() {
+  if (!page.source) return null;
+  const link = new URL(location.pathname, location.href);
+  if (page.source.fw) link.searchParams.set('fw', page.source.fw);
+  link.searchParams.set('game', page.source.game);
+  return link.href;
+}
+
+// --- setup panel -----------------------------------------------------------------
+
+async function showSetup() {
+  const deviceReady = await hasDevice();
+  $('fw-row').hidden = deviceReady;
+  $('fw-url-row').hidden = deviceReady;
+
+  const site = page.site || {};
+  $('fw-url').value = params.get('fw') || settings.urls.fw || site.fw || '';
+  $('game-url').value = params.get('game') || settings.urls.game || site.game || '';
+
+  $('setup-note').textContent = deviceReady
+    ? 'The firmware is already installed. Choose a game card dump.'
+    : 'You need an N-Gage firmware (ROM) dump and a game card dump. The firmware is only needed once.';
+
+  const play = $('btn-play');
+  play.hidden = !(site.game && (deviceReady || site.fw));
+  play.textContent = `Play ${site.title || 'the game'}`;
+
+  setup.hidden = false;
+  setStatus(deviceReady ? 'Choose a game.' : 'Choose a firmware and a game.');
+}
+
+function wireSetup() {
+  const run = (work) => async () => {
+    setup.hidden = true;
+    try {
+      await work();
+      canvas.focus();
+    } catch (error) {
+      reportError(error);
+      setup.hidden = false;
+    }
+  };
+
+  const loadAndLink = async (fwUrl, gameUrl) => {
+    await loadFromUrls(fwUrl, gameUrl);
+    // Put the game in the address bar: a reload or a bookmark starts it.
+    const link = shareLink();
+    if (link) {
+      const next = new URL(link);
+      for (const key of ['log', 'persist', 'touch', 'fps']) {
+        if (params.has(key)) next.searchParams.set(key, params.get(key));
+      }
+      history.replaceState(null, '', next);
+    }
+  };
+
+  $('btn-load-url').addEventListener('click', run(() => loadAndLink($('fw-url').value.trim(), $('game-url').value.trim())));
+  $('btn-play').addEventListener('click', run(() => loadAndLink(page.site.fw || '', page.site.game)));
+  for (const id of ['fw-url', 'game-url']) {
+    $(id).addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); $('btn-load-url').click(); }
+    });
+  }
+
+  setup.addEventListener('submit', (event) => {
+    event.preventDefault();
+    run(async () => {
+      const fwFile = $('fw-file').files[0];
+      const gameFile = $('game-file').files[0];
+      const deviceReady = await hasDevice();
+      if (!gameFile) throw new Error('Choose a game card dump.');
+      if (!deviceReady && !fwFile) throw new Error('Choose an N-Gage firmware dump too; none is installed yet.');
+
+      if (!deviceReady) await installFirmware(new Uint8Array(await fwFile.arrayBuffer()));
+      await installAndLaunch(new Uint8Array(await gameFile.arrayBuffer()), gameFile.name);
+      page.source = null;
+      refreshControls();
+    })();
+  });
+}
+
+// --- controls ----------------------------------------------------------------------
+
+function activeProfile() {
+  if (settings.profile === 'auto') return profileFor(page.app ? page.app.uid : null);
+  if (settings.profile === STANDARD_PROFILE.id) return STANDARD_PROFILE;
+  return Object.values(GAME_PROFILES).find((profile) => profile.id === settings.profile) || STANDARD_PROFILE;
+}
+
+function effectiveBindings(profile) {
+  const custom = settings.bindings[profile.id];
+  return custom || { keyboard: profile.keyboard, gamepad: profile.gamepad };
+}
+
+function applyBindings() {
+  const profile = activeProfile();
+  page.input.setBindings(effectiveBindings(profile));
+
+  // Say what each number key does on the touch keypad.
+  for (const caption of document.querySelectorAll('#keypad .key')) {
+    caption.querySelector('small').textContent = shortAction(profile.actions[caption.dataset.key] || '');
+  }
+
+  $('help').textContent = profile === STANDARD_PROFILE
+    ? 'Arrows move · Enter OK · Q / W soft keys · 0–9 keypad · - ✱ · = # · Backspace clear. Menu → Guide lists every control.'
+    : `${profile.name} layout: ${summary(profile)}. Menu → Guide lists every control.`;
+}
+
+function shortAction(action) {
+  return action.replace(/^Use /, '').replace(/^Side step /, 'Step ').replace(/^Cycle /, '').replace(/ manager$/, '').replace(/ action$/, ' act.');
+}
+
+function summary(profile) {
+  const bindings = effectiveBindings(profile).keyboard;
+  const first = (key) => (bindings[key] && bindings[key][0] ? keyName(bindings[key][0]) : '?');
+  const pick = ['up', '4', 'left', '1', '3', '7', '5', 'rsk'].filter((key) => profile.actions[key]);
+  return pick.map((key) => `${first(key)} ${shortAction(profile.actions[key]).toLowerCase()}`).join(' · ');
+}
+
+function renderControls() {
+  const profile = activeProfile();
+  const bindings = effectiveBindings(profile);
+
+  const select = $('profile-select');
+  const auto = profileFor(page.app ? page.app.uid : null);
+  const options = [['auto', `Automatic (${auto.name})`], [STANDARD_PROFILE.id, STANDARD_PROFILE.name],
+    ...Object.values(GAME_PROFILES).map((game) => [game.id, game.name])];
+  select.innerHTML = options.map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`).join('');
+  select.value = settings.profile;
+
+  $('controls-hint').textContent = settings.bindings[profile.id]
+    ? 'This layout has been customised.'
+    : 'These are the defaults for this layout.';
+
+  const chips = (key, device) => {
+    const names = (bindings[device][key] || []).map((input) =>
+      `<button type="button" class="chip" data-device="${device}" data-key="${key}" data-input="${escapeHtml(input)}" title="Remove">${escapeHtml(device === 'keyboard' ? keyName(input) : padName(input))}</button>`);
+    names.push(`<button type="button" class="chip add" data-device="${device}" data-key="${key}" title="Add a binding">+</button>`);
+    return `<div class="chips">${names.join('')}</div>`;
+  };
+
+  $('bindings').tBodies[0].innerHTML = NGAGE_KEYS.map(({ id, label }) =>
+    `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(profile.actions[id] || '')}</td><td>${chips(id, 'keyboard')}</td><td>${chips(id, 'gamepad')}</td></tr>`).join('');
+}
+
+// Copies the profile's tables into the settings the first time one is edited.
+function editableBindings(profile) {
+  if (!settings.bindings[profile.id]) {
+    settings.bindings[profile.id] = structuredClone({ keyboard: profile.keyboard, gamepad: profile.gamepad });
+  }
+  return settings.bindings[profile.id];
+}
+
+async function onBindingClick(event) {
+  const chip = event.target.closest('.chip');
+  if (!chip) return;
+
+  const profile = activeProfile();
+  const { device, key } = chip.dataset;
+
+  if (!chip.classList.contains('add')) {
+    const table = editableBindings(profile)[device];
+    table[key] = (table[key] || []).filter((input) => input !== chip.dataset.input);
+  } else {
+    chip.classList.add('listening');
+    chip.textContent = device === 'keyboard' ? 'Press a key…' : 'Press a button…';
+    const input = await page.input.captureNext(device);
+    if (input) {
+      const table = editableBindings(profile)[device];
+      // One host input presses one N-Gage key: take it away from any other.
+      for (const other of Object.keys(table)) table[other] = table[other].filter((existing) => existing !== input);
+      table[key] = [...(table[key] || []), input];
+    }
+  }
+
+  saveSettings();
+  applyBindings();
+  renderControls();
+}
+
+function wireControlsDialog() {
+  $('bindings').addEventListener('click', (event) => onBindingClick(event).catch(reportError));
+  $('profile-select').addEventListener('change', () => {
+    settings.profile = $('profile-select').value;
+    saveSettings();
+    applyBindings();
+    renderControls();
+  });
+  $('controls-reset').addEventListener('click', () => {
+    delete settings.bindings[activeProfile().id];
+    saveSettings();
+    applyBindings();
+    renderControls();
+  });
+  $('controls').addEventListener('close', () => page.input.cancelCapture());
+}
+
+// --- display -----------------------------------------------------------------------
+
+// `shader` names a file in the emulator's resources/upscale folder. Only ones
+// checked to compile and change the picture under WebGL2 are listed (the
+// upstream xBR filters do not).
+const FILTERS = [
+  { id: 'nearest', label: 'Sharp pixels', hint: 'Every game pixel is a crisp block. Best with a whole-number resolution.' },
+  { id: 'linear', label: 'Smooth', hint: 'Plain bilinear blending.' },
+  { id: 'fsr', shader: 'fsr', label: 'FSR 1.0 upscale', hint: 'AMD FidelityFX Super Resolution 1.0: edge-adaptive upscaling that keeps edges clean without blockiness.' },
+  { id: 'fsr_sharp', shader: 'fsr_sharp', label: 'FSR 1.0 upscale + sharpen', hint: 'FSR 1.0 with its contrast-adaptive sharpening pass. Crisper, and about five times the GPU work.' },
+  { id: '4xhq', shader: '4xhq', label: 'HQ 4×', hint: 'Pixel-art scaler with soft gradients.' },
+  { id: 'fxaa', shader: 'fxaa', label: 'FXAA', hint: 'Anti-aliasing that softens jagged edges.' },
+  { id: 'sharpen', shader: 'sharpen', label: 'Sharpen', hint: 'A simple sharpening filter.' },
+  { id: 'natural', shader: 'natural', label: 'Natural colours', hint: 'Warmer, more saturated colours.' },
+  { id: 'scanline', shader: 'scanline', label: 'Scanlines', hint: 'Dark lines between rows, like an old display.' },
+  { id: 'CRT-Lottes', shader: 'CRT-Lottes', label: 'CRT', hint: 'Curved tube with a shadow mask and bloom.' },
+  { id: 'zfast_lcd', shader: 'zfast_lcd', label: 'LCD grid', hint: 'The visible pixel grid of a handheld LCD.' },
+];
+
+const RESOLUTIONS = [
+  { id: 'auto', label: 'Match the display', hint: 'Renders at the size the picture is shown at, so scaling filters work at full detail.' },
+  ...[1, 2, 3, 4, 6].map((n) => ({ id: String(n), label: `${n}× native`, hint: '' })),
+];
+
+function surfaceSize() {
+  const { width, height } = page.screen;
+  if (settings.display.resolution !== 'auto') {
+    const factor = Number(settings.display.resolution) || 3;
+    return [width * factor, height * factor];
+  }
+
+  const stage = $('stage').getBoundingClientRect();
+  const scale = Math.min(stage.width / width, stage.height / height) * (window.devicePixelRatio || 1);
+  // Keep a huge window from asking for an enormous canvas.
+  const capped = Math.max(1, Math.min(scale, 2400 / height));
+  return [Math.round(width * capped), Math.round(height * capped)];
+}
+
+function applyDisplay() {
+  if (!page.emu) return;
+  const filter = FILTERS.find((item) => item.id === settings.display.filter) || FILTERS[0];
+  const module = page.emu.module;
+
+  const [width, height] = surfaceSize();
+  module._eka2l1_web_set_surface_size(width, height);
+  module.ccall('eka2l1_web_set_upscale_shader', null, ['string'], [filter.shader || '']);
+  page.emu.request('PATCH', '/v1/config', { nearestNeighborFiltering: filter.id === 'nearest' });
+
+  // The browser scales the canvas the rest of the way; match the look.
+  canvas.style.imageRendering = filter.id === 'nearest' ? 'pixelated' : 'auto';
+  $('stage').style.setProperty('--aspect', `${page.screen.width} / ${page.screen.height}`);
+  page.surface = { width, height, filter: filter.id };
+}
+
+function renderDisplay() {
+  const filterSelect = $('filter-select');
+  filterSelect.innerHTML = FILTERS.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join('');
+  filterSelect.value = (FILTERS.find((item) => item.id === settings.display.filter) || FILTERS[0]).id;
+
+  const resolutionSelect = $('resolution-select');
+  resolutionSelect.innerHTML = RESOLUTIONS.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join('');
+  resolutionSelect.value = (RESOLUTIONS.find((item) => item.id === settings.display.resolution) || RESOLUTIONS[0]).id;
+
+  const filter = FILTERS.find((item) => item.id === filterSelect.value);
+  $('filter-hint').textContent = `${filter.hint} FSR 2 is not offered: it needs depth and motion data from a 3D renderer, and a game here only hands over finished 2D frames.`;
+  const [width, height] = surfaceSize();
+  $('resolution-hint').textContent = `Canvas ${width}×${height} (game screen ${page.screen.width}×${page.screen.height}).`;
+}
+
+function wireDisplayDialog() {
+  const change = () => {
+    settings.display.filter = $('filter-select').value;
+    settings.display.resolution = $('resolution-select').value;
+    saveSettings();
+    applyDisplay();
+    renderDisplay();
+  };
+  $('filter-select').addEventListener('change', change);
+  $('resolution-select').addEventListener('change', change);
+
+  let pending = 0;
+  const resized = () => {
+    clearTimeout(pending);
+    pending = setTimeout(() => { if (settings.display.resolution === 'auto') applyDisplay(); }, 150);
+  };
+  window.addEventListener('resize', resized);
+  window.addEventListener('orientationchange', resized);
+  document.addEventListener('fullscreenchange', resized);
+}
+
+// --- saves -------------------------------------------------------------------------
+
+async function renderSaves(message = '') {
+  const body = $('save-list').tBodies[0];
+  const files = await listSaves(page.emu);
+  body.innerHTML = files.length
+    ? files.map((file) => `<tr><td>${escapeHtml(file.path)}</td><td class="num">${file.size.toLocaleString()} B</td><td class="num">${escapeHtml((file.modified || '').replace('T', ' ').replace('Z', ''))}</td></tr>`).join('')
+    : '<tr><td class="empty" colspan="3">Nothing saved yet. Save from the game\'s own menu first.</td></tr>';
+  $('saves-export').disabled = files.length === 0;
+  $('saves-status').textContent = message;
+  return files;
+}
+
+function wireSavesDialog() {
+  $('saves-export').addEventListener('click', async () => {
+    try {
+      const { blob, files } = await exportSaves(page.emu);
+      const name = exportFileName();
+      page.lastExport = { blob, name, files };
+      downloadBlob(blob, name);
+      $('saves-status').textContent = `Exported ${files} file${files === 1 ? '' : 's'} to ${name}.`;
+    } catch (error) {
+      $('saves-status').textContent = String(error.message || error);
+    }
+  });
+
+  $('saves-import').addEventListener('click', () => $('save-import-file').click());
+  $('save-import-file').addEventListener('change', async () => {
+    const file = $('save-import-file').files[0];
+    $('save-import-file').value = '';
+    if (!file) return;
+    try {
+      const { written, skipped } = await importSaves(page.emu, await file.arrayBuffer());
+      await renderSaves(`Imported ${written} file${written === 1 ? '' : 's'}${skipped ? `, skipped ${skipped} outside the save folder` : ''}. `
+        + 'Restart the game (Menu → Restart game) so it reads them.');
+    } catch (error) {
+      $('saves-status').textContent = String(error.message || error);
+    }
+  });
+}
+
+// --- guide -------------------------------------------------------------------------
+
+function renderGuide() {
+  const profile = activeProfile();
+  const bindings = effectiveBindings(profile);
+  const names = (key, device) => (bindings[device][key] || []).map((input) => (device === 'keyboard' ? keyName(input) : padName(input))).join(', ') || '—';
+
+  const rows = NGAGE_KEYS
+    .filter(({ id }) => profile === STANDARD_PROFILE || profile.actions[id])
+    .map(({ id, label }) => `<tr><td>${escapeHtml(profile.actions[id] || label)}</td><td>${escapeHtml(label)}</td><td>${escapeHtml(names(id, 'keyboard'))}</td><td>${escapeHtml(names(id, 'gamepad'))}</td></tr>`)
+    .join('');
+
+  const notes = (profile.notes || []).map((note) => `<li><span></span><span>${escapeHtml(note)}</span></li>`).join('');
+
+  $('guide-body').innerHTML = `
+    <h3>Controls: ${escapeHtml(profile.name)}</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>${profile === STANDARD_PROFILE ? 'Key' : 'Action'}</th><th>N-Gage key</th><th>Keyboard</th><th>Gamepad</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <ul>${notes}</ul>
+    <p class="hint">On a touch screen the same N-Gage keys are on screen: the pad, OK and C on the left, the two soft keys above, and the number keys on the right${profile === STANDARD_PROFILE ? '' : ', labelled with what they do in this game'}.
+    Change any binding under Menu → Controls. A gamepad is picked up when you press a button on it.</p>
+
+    <h3>Loading a game</h3>
+    <ul>
+      <li><span></span><span>You need two files of your own: an N-Gage firmware (ROM) dump and a game card dump packed as .zip. The firmware is installed once and kept.</span></li>
+      <li><span></span><span><b>Load from URL</b> takes the address of each file and then puts them in the page address, so a bookmark or a shared link starts the game by itself. The server hosting the files must allow this site to fetch them (CORS).</span></li>
+      <li><span></span><span><b>Load files</b> reads them from this device instead.</span></li>
+      <li><span></span><span>A game you loaded before starts without downloading again.</span></li>
+    </ul>
+
+    <h3>Saving</h3>
+    <ul>
+      <li><span></span><span>Save inside the game, from its own menu. The page stores the phone's memory in this browser a few seconds later and whenever you leave the tab.</span></li>
+      <li><span></span><span><b>Menu → Saves</b> lists the save files and exports them as a .zip, to back up or move to another browser or device. Import a .zip there, then restart the game.</span></li>
+      <li><span></span><span>Clearing this site's data in the browser deletes the stored firmware, games and saves. Export first.</span></li>
+    </ul>
+
+    <h3>Display</h3>
+    <ul>
+      <li><span></span><span><b>Menu → Display</b> chooses how the ${page.screen.width}×${page.screen.height} game picture is scaled: sharp pixels, smooth, FSR 1.0, pixel-art scalers and screen effects.</span></li>
+      <li><span></span><span>FSR 2 cannot be used: it is a temporal upscaler that needs depth and motion data from a 3D renderer, and the emulator only receives the game's finished frames. FSR 1.0 is the spatial version that works on any image.</span></li>
+      <li><span></span><span>None of these change the game's speed, which depends on your device's processor.</span></li>
+    </ul>`;
+}
+
+// --- session controls ----------------------------------------------------------------
 
 function refreshControls() {
   const running = Boolean(page.app);
   $('btn-pause').disabled = !running;
-  $('btn-restart').disabled = !running;
-  $('btn-mute').disabled = !page.emu;
   $('btn-pause').textContent = page.paused ? 'Resume' : 'Pause';
   $('btn-pause').setAttribute('aria-pressed', String(page.paused));
-  $('btn-mute').textContent = page.muted ? 'Unmute' : 'Mute';
-  $('btn-mute').setAttribute('aria-pressed', String(page.muted));
+  $('m-restart').disabled = !running;
+  $('m-saves').disabled = !page.emu;
+  $('m-mute').disabled = !page.emu;
+  $('m-mute').textContent = page.muted ? 'Unmute' : 'Mute';
+  $('m-link').disabled = !shareLink();
 }
 
 async function setPaused(paused, byUser) {
@@ -167,26 +621,57 @@ async function restart() {
   setStatus('Restarting…');
   page.input.releaseAll();
   await page.emu.call('DELETE', '/v1/session');
-  await launch(page.emu, app);
+  await launch(app);
+}
+page.restart = restart;
+
+async function closeGame() {
+  if (!page.emu || !page.app) return;
+  page.input.releaseAll();
+  page.emu.module._eka2l1_web_save();
+  await page.emu.call('DELETE', '/v1/session');
+  page.app = null;
+  page.source = null;
+  overlay.hidden = true;
+  refreshControls();
 }
 
 function wireControls() {
   $('btn-pause').addEventListener('click', () => setPaused(!page.paused, true));
-  $('btn-restart').addEventListener('click', () => restart().catch(reportError));
-  $('btn-mute').addEventListener('click', () => {
+  $('btn-menu').addEventListener('click', () => { refreshControls(); $('menu').showModal(); });
+
+  // A menu entry closes the menu and then acts.
+  const entry = (id, action) => $(id).addEventListener('click', () => {
+    $('menu').close();
+    Promise.resolve().then(action).catch(reportError);
+  });
+
+  entry('m-restart', restart);
+  entry('m-mute', () => {
     page.muted = !page.muted;
     page.emu.setMuted(page.muted || page.paused);
     refreshControls();
   });
-  $('btn-keypad').addEventListener('click', () => {
-    $('keypad').hidden = !$('keypad').hidden;
-    $('btn-keypad').setAttribute('aria-pressed', String(!$('keypad').hidden));
-  });
-  $('btn-fullscreen').addEventListener('click', () => {
+  entry('m-fullscreen', () => {
     if (document.fullscreenElement) document.exitFullscreen();
     else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
   });
-  $('btn-info').addEventListener('click', showInfo);
+  entry('m-controls', () => { renderControls(); $('controls').showModal(); });
+  entry('m-display', () => { renderDisplay(); $('display').showModal(); });
+  entry('m-saves', async () => { await renderSaves(); $('saves').showModal(); });
+  entry('m-load', async () => { await closeGame(); await showSetup(); });
+  entry('m-link', async () => {
+    const link = shareLink();
+    try {
+      await navigator.clipboard.writeText(link);
+      setStatus('Link copied.');
+    } catch {
+      setStatus(link);
+    }
+    setTimeout(() => { if (page.app && !statusEl.classList.contains('error')) setStatus(page.app.name); }, 4000);
+  });
+  entry('m-guide', () => { renderGuide(); $('guide').showModal(); });
+  entry('m-info', showInfo);
 
   // A hidden tab gets no animation frames, so the game cannot be shown anyway:
   // pause it, flush saves, and pick up again when the tab returns.
@@ -202,10 +687,10 @@ function wireControls() {
   window.addEventListener('pagehide', () => { if (page.emu) page.emu.module._eka2l1_web_save(); });
 }
 
-function wireAudio(emu) {
+function wireAudio() {
   // Browsers only allow sound after a user gesture.
   const unlock = () => {
-    emu.enableAudio().then(() => { if (page.muted || page.paused) emu.setMuted(true); })
+    page.emu.enableAudio().then(() => { if (page.muted || page.paused) page.emu.setMuted(true); })
       .catch((error) => console.warn('audio unavailable:', error));
     if (!page.paused) overlay.hidden = true;
   };
@@ -237,28 +722,20 @@ function showInfo() {
   }
   if (page.emu) {
     const stats = page.emu.stats();
-    html += `<h3>Session</h3><ul><li><span></span><span>${Math.round(stats.frames)} frames · heap ${stats.heapMB.toFixed(0)} MB · `
-      + `graphics ${(stats.frames ? stats.graphicsBusyMs / stats.frames : 0).toFixed(2)} ms/frame · gamepads ${page.gamepads || 0}</span></li></ul>`;
+    const surface = page.surface ? ` · canvas ${page.surface.width}×${page.surface.height} (${page.surface.filter})` : '';
+    html += `<h3>Session</h3><ul><li><span></span><span>${Math.round(stats.frames)} frames · ${page.fps.toFixed(1)} fps · heap ${stats.heapMB.toFixed(0)} MB · `
+      + `graphics ${(stats.frames ? stats.graphicsBusyMs / stats.frames : 0).toFixed(2)} ms/frame · gamepads ${page.gamepads}${surface}</span></li></ul>`;
   }
 
   $('info-body').innerHTML = html;
   $('info').showModal();
 }
 
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
-}
-
-function reportError(error) {
-  console.error(error);
-  setStatus(String(error && error.message ? error.message : error), true);
-}
-
-function startFpsReadout(emu) {
-  let lastFrames = emu.frames();
+function startFpsReadout() {
+  let lastFrames = page.emu.frames();
   let lastTime = performance.now();
   setInterval(() => {
-    const frames = emu.frames();
+    const frames = page.emu.frames();
     const now = performance.now();
     page.fps = ((frames - lastFrames) * 1000) / (now - lastTime);
     lastFrames = frames;
@@ -267,12 +744,24 @@ function startFpsReadout(emu) {
   }, 1000);
 }
 
+async function loadSiteConfig() {
+  try {
+    const response = await fetch('config.json', { cache: 'no-store' });
+    if (!response.ok) return null;
+    const config = await response.json();
+    return config && typeof config === 'object' ? config : null;
+  } catch {
+    return null;
+  }
+}
+
 // --- boot ----------------------------------------------------------------------
 
 async function main() {
   wireControls();
+  wireSetup();
 
-  page.support = await detectSupport();
+  [page.support, page.site] = await Promise.all([detectSupport(), loadSiteConfig()]);
 
   const wantTouch = params.get('touch');
   if (wantTouch === '1' || (wantTouch !== '0' && (page.support.mobile || matchMedia('(pointer: coarse)').matches))) {
@@ -297,8 +786,12 @@ async function main() {
   page.input.attachButtons(document.body);
   page.input.attachDpad($('dpad'));
   page.input.attachGamepads();
-  wireAudio(emu);
-  startFpsReadout(emu);
+  applyBindings();
+  wireControlsDialog();
+  wireDisplayDialog();
+  wireSavesDialog();
+  wireAudio();
+  startFpsReadout();
   refreshControls();
 
   // ?log=<filter> turns emulator logging up, e.g. ?log=*:info or ?log=*:trace.
@@ -306,48 +799,21 @@ async function main() {
     await emu.call('PATCH', '/v1/config', { logFilter: params.get('log') });
   }
 
-  const devices = await emu.call('GET', '/v1/devices');
-  const hasDevice = devices.devices.length > 0;
-
   const fwUrl = params.get('fw');
   const gameUrl = params.get('game');
 
-  if ((hasDevice || fwUrl) && gameUrl) {
-    if (!hasDevice) await installFirmware(emu, await fetchBytes(fwUrl, 'Firmware'));
-
-    const installed = hasDevice ? await findInstalledGame(emu, gameUrl) : null;
-    if (installed) {
-      await launch(emu, installed);
-    } else {
-      const name = new URL(gameUrl, location.href).pathname.split('/').pop() || 'game.zip';
-      await installAndLaunch(emu, await fetchBytes(gameUrl, 'Game'), name, gameUrl);
+  if (gameUrl && (fwUrl || await hasDevice())) {
+    try {
+      await loadFromUrls(fwUrl || '', gameUrl);
+    } catch (error) {
+      reportError(error);
+      await showSetup();
+      setStatus(String(error.message || error), true);
     }
-
-    overlay.textContent = page.support.mobile ? 'Tap for sound' : 'Click or press a key for sound';
-    overlay.hidden = false;
     return;
   }
 
-  // No URLs given: ask for files.
-  setStatus(hasDevice ? 'Choose a game card dump.' : 'Choose your N-Gage firmware and a game card dump.');
-  $('fw-row').hidden = hasDevice;
-  setup.hidden = false;
-  setup.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const fwFile = $('fw-file').files[0];
-    const gameFile = $('game-file').files[0];
-    if ((!hasDevice && !fwFile) || !gameFile) return;
-
-    setup.hidden = true;
-    try {
-      if (!hasDevice) await installFirmware(emu, new Uint8Array(await fwFile.arrayBuffer()));
-      await installAndLaunch(emu, new Uint8Array(await gameFile.arrayBuffer()), gameFile.name);
-      canvas.focus();
-    } catch (error) {
-      reportError(error);
-      setup.hidden = false;
-    }
-  });
+  await showSetup();
 }
 
 main().catch(reportError);
