@@ -18,6 +18,12 @@ export const KEYS = {
 // How much of a file goes to the emulator in one request.
 const PIECE_BYTES = 4 * 1024 * 1024;
 
+// Where this module was loaded from. The wasm, its data file and the audio
+// worklet sit beside it, which need not be where the page is: a site can keep
+// each build of the player in a folder of its own, so that a browser never
+// mixes files of two builds.
+const HERE = new URL('./', import.meta.url).href;
+
 export class Eka2l1 {
   constructor() {
     this.module = null;
@@ -31,7 +37,7 @@ export class Eka2l1 {
 
   // Loads the wasm module and resolves once the emulator core is up.
   // `persist: false` keeps everything in memory (nothing survives a reload).
-  async start({ canvas, baseUrl = './', onLog = null, persist = true } = {}) {
+  async start({ canvas, baseUrl = HERE, onLog = null, persist = true } = {}) {
     let ready;
     const whenReady = new Promise((resolve) => { ready = resolve; });
 
@@ -220,7 +226,7 @@ export class Eka2l1 {
 
   // Starts audio output. Must run inside a user gesture (click or key press),
   // otherwise the browser keeps the AudioContext suspended.
-  async enableAudio(baseUrl = './') {
+  async enableAudio(baseUrl = HERE) {
     if (this.audio) {
       await this.audio.resume();
       return;
