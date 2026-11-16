@@ -7,11 +7,15 @@
 #include <string>
 
 namespace eka2l1::web::persist {
-    // The emulator works on an in-memory data tree; this mirrors it to the
-    // origin's private file system (OPFS) so installed devices, games and saves
-    // survive a reload. Running directly on OPFS is not an option: the ROM is
-    // memory-mapped, which that backend does not support, and per-call
-    // proxying would slow every guest file access.
+    // The emulator works on an in-memory data tree; this mirrors the part of
+    // it a visitor creates (the phone's memory, C:, with the saves) to the
+    // origin's private file system (OPFS) so it survives a reload. The
+    // installed firmware and the game card are left out: the page installs
+    // them again each session from its own download cache, which is far
+    // quicker than copying their thousands of files back from OPFS. Running
+    // directly on OPFS is not an option: the ROM is memory-mapped, which that
+    // backend does not support, and per-call proxying would slow every guest
+    // file access.
 
     // Mounts persistent storage and copies a previous snapshot into `live_root`.
     // Returns false when storage is unavailable or empty. Call before the

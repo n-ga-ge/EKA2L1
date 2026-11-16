@@ -34,6 +34,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <unistd.h>
 
 using namespace eka2l1;
 
@@ -143,6 +144,73 @@ namespace {
                 Module['eka2l1OnEvent'](name);
             }
         }, copy);
+    }
+
+    // PUT /v1/files?path=<path>&offset=<n>[&size=<total>] writes the body at
+    // `offset` of the file instead of replacing the file, so the page can hand
+    // a download over piece by piece. The plain PUT takes the whole file in
+    // one body, which for a 54 MB card dump meant holding it three times in
+    // the heap (the page's copy, the request body, the file) on top of the
+    // copy in the page's own memory. `size`, sent with the first piece, sets
+    // the length up front so the file is allocated once rather than grown.
+    // Returns false for every other request.
+    bool write_piece(const control::request &req, control::response &res) {
+        if (req.method != "PUT" || req.path != std::vector<std::string>{ "v1", "files" } || !req.query.count("offset")) {
+            return false;
+        }
+
+        // The backend maps docs:/ and drive paths, as for a whole-file upload.
+        control::response resolved;
+        {
+            std::lock_guard<std::recursive_mutex> guard(state.control_mutex);
+            resolved = state.control_backend->handle({ "RESOLVE", req.path, req.query, {}, {} });
+        }
+        if (resolved.status >= 400) {
+            res = resolved;
+            return true;
+        }
+
+        // A mistyped offset must not be read as zero: that would start the
+        // file over and lose the pieces already written.
+        const auto digits = [](const std::string &text) {
+            return !text.empty() && text.size() <= 18 && text.find_first_not_of("0123456789") == std::string::npos;
+        };
+        if (!digits(req.param("offset")) || !digits(req.param("size", "0"))) {
+            res = control::response::error(400, "bad_request", "offset and size must be non-negative integers");
+            return true;
+        }
+
+        try {
+            const std::filesystem::path path = control::required_string(control::json::parse(resolved.body), "hostPath");
+            const std::uint64_t offset = std::strtoull(req.param("offset").c_str(), nullptr, 10);
+            const std::uint64_t size = std::strtoull(req.param("size", "0").c_str(), nullptr, 10);
+
+            std::error_code ec;
+            if (std::filesystem::is_directory(path, ec)) {
+                res = control::response::error(409, "is_directory", "path is a directory");
+                return true;
+            }
+            std::filesystem::create_directories(path.parent_path(), ec);
+
+            // The first piece starts the file over; later ones need it there.
+            std::FILE *file = std::fopen(path.c_str(), offset == 0 ? "wb" : "r+b");
+            bool ok = file != nullptr;
+            if (ok && offset == 0 && size > 0) {
+                ok = ftruncate(fileno(file), static_cast<off_t>(size)) == 0;
+            }
+            ok = ok && fseeko(file, static_cast<off_t>(offset), SEEK_SET) == 0
+                && std::fwrite(req.body.data(), 1, req.body.size(), file) == req.body.size();
+            if (file) {
+                ok = (std::fclose(file) == 0) && ok;
+            }
+
+            res = ok ? control::response::from_json({ { "path", req.param("path") }, { "hostPath", path.string() },
+                           { "size", static_cast<std::uint64_t>(offset + req.body.size()) } })
+                     : control::response::error(500, "write_failed", "cannot write file");
+        } catch (const std::exception &error) {
+            res = control::response::error(500, "write_failed", error.what());
+        }
+        return true;
     }
 
     void setup_control() {
@@ -276,14 +344,19 @@ int main(int argc, char **argv) {
     }
     std::filesystem::current_path("/eka2l1");
 
+    // "boot:<step>" events let the page time the start-up.
+    notify_page("boot:main");
+
     if (persist) {
-        // Bring back what a previous visit installed and saved.
+        // Bring back what a previous visit saved.
         if (web::persist::restore("/eka2l1/data")) {
             std::printf("Restored saved data\n");
         }
     }
+    notify_page("boot:restored");
 
     state.stage_one();
+    notify_page("boot:core");
 
     // The audio driver exists from the start so the page can attach its
     // worklet before any device is booted.
@@ -299,6 +372,7 @@ int main(int argc, char **argv) {
     } else {
         LOG_WARN(FRONTEND_CMDLINE, "No canvas on the page; running without a graphics driver");
     }
+    notify_page("boot:graphics");
 
     setup_control();
 
@@ -328,6 +402,13 @@ int main(int argc, char **argv) {
         }
 
         const int id = pending.id;
+
+        control::response written;
+        if (write_piece(pending.request, written)) {
+            deliver(id, written);
+            continue;
+        }
+
         state.control_service->handle(std::move(pending.request), [id](control::response res) {
             deliver(id, res);
         });

@@ -15,6 +15,9 @@ export const KEYS = {
   0: 0x30, 1: 0x31, 2: 0x32, 3: 0x33, 4: 0x34, 5: 0x35, 6: 0x36, 7: 0x37, 8: 0x38, 9: 0x39,
 };
 
+// How much of a file goes to the emulator in one request.
+const PIECE_BYTES = 4 * 1024 * 1024;
+
 export class Eka2l1 {
   constructor() {
     this.module = null;
@@ -22,6 +25,8 @@ export class Eka2l1 {
     this.pending = new Map();
     this.listeners = new Set();
     this.audio = null;
+    // Whether this build takes a file in pieces (see uploadFrom).
+    this.pieces = false;
   }
 
   // Loads the wasm module and resolves once the emulator core is up.
@@ -45,6 +50,10 @@ export class Eka2l1 {
       },
       eka2l1OnEvent: (name) => {
         if (name === 'ready') ready();
+        // "boot:<step>" events mark the emulator's start-up for performance
+        // tools. A build that sends them also accepts a file in pieces.
+        if (name.startsWith('boot:')) this.pieces = true;
+        if (name.startsWith('boot:') || name === 'ready') performance.mark(`eka2l1:${name}`);
         for (const listener of this.listeners) listener(name);
       },
     });
@@ -119,11 +128,59 @@ export class Eka2l1 {
     return stored.hostPath;
   }
 
+  // Like upload(), for a file that is not in memory: `source` is
+  // { bytes, open() } where open() resolves to a stream of the file and
+  // `bytes` is its size when known (0 otherwise). The stream goes to the
+  // emulator a few megabytes at a time, so neither the page nor the emulator
+  // ever holds a second copy of the whole file. `onProgress(sent)` is called
+  // after each piece.
+  async uploadFrom(name, source, onProgress = null) {
+    const stream = await source.open();
+
+    if (!this.pieces) {
+      // A build from before piecewise uploads: hand the file over whole.
+      return this.upload(name, new Uint8Array(await new Response(stream).arrayBuffer()));
+    }
+
+    const target = `/v1/files?path=${encodeURIComponent('docs:/uploads/' + name)}`;
+    const piece = new Uint8Array(PIECE_BYTES);
+    let filled = 0;
+    let offset = 0;
+    let hostPath = null;
+
+    const flush = async () => {
+      // The size, sent with the first piece, lets the emulator allocate the
+      // file once instead of growing it.
+      const size = offset === 0 && source.bytes ? `&size=${source.bytes}` : '';
+      const stored = await this.call('PUT', `${target}&offset=${offset}${size}`, piece.subarray(0, filled));
+      hostPath = stored.hostPath;
+      offset += filled;
+      filled = 0;
+      if (onProgress) onProgress(offset);
+    };
+
+    const reader = stream.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (let at = 0; at < value.length;) {
+        const take = Math.min(PIECE_BYTES - filled, value.length - at);
+        piece.set(value.subarray(at, at + take), filled);
+        filled += take;
+        at += take;
+        if (filled === PIECE_BYTES) await flush();
+      }
+    }
+    if (filled || offset === 0) await flush();
+    performance.mark(`eka2l1:uploaded:${name}`);
+    return hostPath;
+  }
+
   key(scancode, down) {
     this.module._eka2l1_web_key(scancode, down ? 1 : 0);
   }
 
-  // Writes installed data and saves to persistent storage now. Resolves once a
+  // Writes the phone's memory (the saves) to persistent storage now. Resolves once a
   // storage pass that began after this call has finished, so everything
   // written before it is safe; resolves at once when persistence is off.
   save() {
