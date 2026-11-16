@@ -25,8 +25,9 @@
 // origin.
 
 import { Eka2l1 } from './eka2l1-client.js';
-import { GAME_PROFILES, NGAGE_KEYS, STANDARD_PROFILE, keyName, padName, profileFor } from './games.js';
+import { NGAGE_KEYS, STANDARD_PROFILE, keyName, padName } from './games.js';
 import { Input } from './input.js';
+import { autoProfile, gameProfiles, lookUpGame, lookUpProfile, profileById, siteLinks, switchBindings } from './profiles.js';
 import { downloadBlob, exportFileName, exportSaves, importSaves, listSaves } from './saves.js';
 import { saveSettings, settings } from './settings.js';
 import { detectSupport } from './support.js';
@@ -288,39 +289,130 @@ function wireSetup() {
 
 // --- controls ----------------------------------------------------------------------
 
+// What the site's catalogue says about the running game (profiles.js), or
+// null: no catalogue, a game it does not list, or the answer is still on its way.
+page.game = null;
+const pageTitle = document.title;
+let askedGame = null; // the game the catalogue was last asked about
+let askedProfile = null; // the layout chosen by name it was last asked for
+let appliedProfile = null; // the profile the input tables were last built from
+
+// Builds an element. Children are nodes or strings, and strings become text:
+// names and notes from the catalogue are never parsed as HTML.
+function el(tag, attributes, ...children) {
+  const node = document.createElement(tag);
+  for (const [name, value] of Object.entries(attributes || {})) {
+    if (name === 'data') Object.assign(node.dataset, value);
+    else node.setAttribute(name, value);
+  }
+  node.append(...children.flat().filter((child) => child !== null && child !== ''));
+  return node;
+}
+
+function runningGame() {
+  return page.app && page.game && page.game.uid === page.app.uid ? page.game : null;
+}
+
 function activeProfile() {
-  if (settings.profile === 'auto') return profileFor(page.app ? page.app.uid : null);
-  if (settings.profile === STANDARD_PROFILE.id) return STANDARD_PROFILE;
-  return Object.values(GAME_PROFILES).find((profile) => profile.id === settings.profile) || STANDARD_PROFILE;
+  const chosen = settings.profile === 'auto' ? null : profileById(settings.profile);
+  return chosen || autoProfile(page.app ? page.app.uid : null);
 }
 
 function effectiveBindings(profile) {
-  const custom = settings.bindings[profile.id];
-  return custom || { keyboard: profile.keyboard, gamepad: profile.gamepad };
+  const custom = Object.hasOwn(settings.bindings, profile.id) ? settings.bindings[profile.id] : null;
+  // Stored tables that are not a pair of tables of input lists (damaged
+  // storage) do not count.
+  const isTable = (table) => table !== null && typeof table === 'object'
+    && Object.values(table).every((inputs) => Array.isArray(inputs) && inputs.every((input) => typeof input === 'string'));
+  return custom && isTable(custom.keyboard) && isTable(custom.gamepad) ? custom : { keyboard: profile.keyboard, gamepad: profile.gamepad };
+}
+
+// A profile or the game's facts arrived from the catalogue: use them now.
+function profilesChanged() {
+  if (activeProfile() !== appliedProfile) {
+    page.input.cancelCapture(); // a binding being recorded was for the layout that is going away
+    applyBindings();
+  }
+  showGameTitle();
+  // The list of layouts may have grown; leave the table alone while a
+  // binding is being recorded in it.
+  if ($('controls').open && !page.input.capturing) renderControls();
+  if ($('guide').open) renderGuide();
+}
+
+// Asks the catalogue about the running game, and for a layout chosen by name.
+// The answers come later; the page carries on with the profile it has and
+// switches when they arrive.
+function followCatalogue() {
+  if (page.app) {
+    const slug = new URLSearchParams(location.search).get('g');
+    const wanted = `${page.app.uid} ${slug || ''}`;
+    if (wanted !== askedGame) {
+      askedGame = wanted;
+      page.game = null;
+      lookUpGame(page.app.uid, slug).then((game) => {
+        if (!game || askedGame !== wanted) return;
+        page.game = game;
+        profilesChanged();
+      }).catch((error) => console.warn('catalogue profile not applied:', error));
+    }
+  }
+
+  const chosen = settings.profile;
+  if (chosen !== 'auto' && chosen !== STANDARD_PROFILE.id && chosen !== askedProfile) {
+    askedProfile = chosen;
+    lookUpProfile(chosen).then((profile) => {
+      if (profile && settings.profile === chosen) profilesChanged();
+    }).catch((error) => console.warn('catalogue profile not applied:', error));
+  }
+}
+
+// Names the game in the status line and the tab. The catalogue's title takes
+// over from the name the emulator read off the card, which is often cut short.
+function showGameTitle() {
+  const app = page.app;
+  const game = runningGame();
+  if (game && game.title && app.name !== game.title) {
+    const shown = statusEl.textContent === app.name && !statusEl.classList.contains('error');
+    app.name = game.title;
+    if (shown) setStatus(app.name);
+  }
+  document.title = app ? `${app.name} · ${pageTitle}` : pageTitle;
 }
 
 function applyBindings() {
+  followCatalogue();
+  showGameTitle();
+
   const profile = activeProfile();
-  page.input.setBindings(effectiveBindings(profile));
+  appliedProfile = profile;
+  switchBindings(page.input, effectiveBindings(profile));
 
   // Say what each number key does on the touch keypad.
   for (const caption of document.querySelectorAll('#keypad .key')) {
-    caption.querySelector('small').textContent = shortAction(profile.actions[caption.dataset.key] || '');
+    const action = profile.actions[caption.dataset.key] || '';
+    // A closing remark in brackets does not fit on a key.
+    caption.querySelector('small').textContent = shortAction(action).replace(/(\S)\s*\([^)]*\)$/, '$1');
+    caption.title = action;
   }
 
+  const line = profile === STANDARD_PROFILE ? '' : summary(profile);
   $('help').textContent = profile === STANDARD_PROFILE
     ? 'Arrows move · Enter OK · Q / W soft keys · 0–9 keypad · - ✱ · = # · Backspace clear. Menu → Guide lists every control.'
-    : `${profile.name} layout: ${summary(profile)}. Menu → Guide lists every control.`;
+    : `${profile.name} layout${line ? `: ${line}` : ''}. Menu → Guide lists every control.`;
 }
 
 function shortAction(action) {
   return action.replace(/^Use /, '').replace(/^Side step /, 'Step ').replace(/^Cycle /, '').replace(/ manager$/, '').replace(/ action$/, ' act.');
 }
 
+// The handful of controls the help line names: movement and the main actions
+// first, then whatever else the profile describes.
 function summary(profile) {
   const bindings = effectiveBindings(profile).keyboard;
   const first = (key) => (bindings[key] && bindings[key][0] ? keyName(bindings[key][0]) : '?');
-  const pick = ['up', '4', 'left', '1', '3', '7', '5', 'rsk'].filter((key) => profile.actions[key]);
+  const order = ['up', '4', 'left', '1', '3', '7', '5', 'rsk', ...NGAGE_KEYS.map((key) => key.id)];
+  const pick = [...new Set(order)].filter((key) => profile.actions[key]).slice(0, 8);
   return pick.map((key) => `${first(key)} ${shortAction(profile.actions[key]).toLowerCase()}`).join(' · ');
 }
 
@@ -329,32 +421,29 @@ function renderControls() {
   const bindings = effectiveBindings(profile);
 
   const select = $('profile-select');
-  const auto = profileFor(page.app ? page.app.uid : null);
-  const options = [['auto', `Automatic (${auto.name})`], [STANDARD_PROFILE.id, STANDARD_PROFILE.name],
-    ...Object.values(GAME_PROFILES).map((game) => [game.id, game.name])];
-  select.innerHTML = options.map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`).join('');
-  select.value = settings.profile;
+  const options = [['auto', `Automatic (${autoProfile(page.app ? page.app.uid : null).name})`], [STANDARD_PROFILE.id, STANDARD_PROFILE.name],
+    ...gameProfiles().map((game) => [game.id, game.name])];
+  select.replaceChildren(...options.map(([value, label]) => el('option', { value }, label)));
+  // A layout chosen by name that is not known (any more) behaves as automatic.
+  select.value = options.some(([value]) => value === settings.profile) ? settings.profile : 'auto';
 
-  $('controls-hint').textContent = settings.bindings[profile.id]
-    ? 'This layout has been customised.'
-    : 'These are the defaults for this layout.';
+  $('controls-hint').textContent = bindings !== settings.bindings[profile.id]
+    ? 'These are the defaults for this layout.'
+    : 'This layout has been customised.';
 
-  const chips = (key, device) => {
-    const names = (bindings[device][key] || []).map((input) =>
-      `<button type="button" class="chip" data-device="${device}" data-key="${key}" data-input="${escapeHtml(input)}" title="Remove">${escapeHtml(device === 'keyboard' ? keyName(input) : padName(input))}</button>`);
-    names.push(`<button type="button" class="chip add" data-device="${device}" data-key="${key}" title="Add a binding">+</button>`);
-    return `<div class="chips">${names.join('')}</div>`;
-  };
+  const chips = (key, device) => el('div', { class: 'chips' },
+    (bindings[device][key] || []).map((input) => el('button', { type: 'button', class: 'chip', title: 'Remove', data: { device, key, input } },
+      device === 'keyboard' ? keyName(input) : padName(input))),
+    el('button', { type: 'button', class: 'chip add', title: 'Add a binding', data: { device, key } }, '+'));
 
-  $('bindings').tBodies[0].innerHTML = NGAGE_KEYS.map(({ id, label }) =>
-    `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(profile.actions[id] || '')}</td><td>${chips(id, 'keyboard')}</td><td>${chips(id, 'gamepad')}</td></tr>`).join('');
+  $('bindings').tBodies[0].replaceChildren(...NGAGE_KEYS.map(({ id, label }) => el('tr', null,
+    el('td', null, label), el('td', null, profile.actions[id] || ''), el('td', null, chips(id, 'keyboard')), el('td', null, chips(id, 'gamepad')))));
 }
 
 // Copies the profile's tables into the settings the first time one is edited.
 function editableBindings(profile) {
-  if (!settings.bindings[profile.id]) {
-    settings.bindings[profile.id] = structuredClone({ keyboard: profile.keyboard, gamepad: profile.gamepad });
-  }
+  const current = effectiveBindings(profile);
+  if (current !== settings.bindings[profile.id]) settings.bindings[profile.id] = structuredClone(current);
   return settings.bindings[profile.id];
 }
 
@@ -538,25 +627,37 @@ function wireSavesDialog() {
 function renderGuide() {
   const profile = activeProfile();
   const bindings = effectiveBindings(profile);
+  const game = runningGame();
+  // A profile that describes no keys is shown like the phone's own layout.
+  const described = Object.keys(profile.actions).length > 0;
   const names = (key, device) => (bindings[device][key] || []).map((input) => (device === 'keyboard' ? keyName(input) : padName(input))).join(', ') || '—';
 
-  const rows = NGAGE_KEYS
-    .filter(({ id }) => profile === STANDARD_PROFILE || profile.actions[id])
-    .map(({ id, label }) => `<tr><td>${escapeHtml(profile.actions[id] || label)}</td><td>${escapeHtml(label)}</td><td>${escapeHtml(names(id, 'keyboard'))}</td><td>${escapeHtml(names(id, 'gamepad'))}</td></tr>`)
-    .join('');
+  const parts = [];
+  if (game) {
+    parts.push(el('h3', null, game.title || page.app.name));
+    if (game.about) parts.push(el('p', { class: 'hint' }, game.about));
+    if (game.status) {
+      parts.push(el('p', null, el('b', { class: game.status.tone }, game.status.label), game.status.note ? `: ${game.status.note}` : ''));
+    }
+  }
 
-  const notes = (profile.notes || []).map((note) => `<li><span></span><span>${escapeHtml(note)}</span></li>`).join('');
+  parts.push(
+    // Under the game's own heading its name need not be said twice.
+    el('h3', null, game && profile.name === game.title ? 'Controls' : `Controls: ${profile.name}`),
+    el('div', { class: 'table-wrap' }, el('table', null,
+      el('thead', null, el('tr', null, ...[described ? 'Action' : 'Key', 'N-Gage key', 'Keyboard', 'Gamepad'].map((heading) => el('th', null, heading)))),
+      el('tbody', null, NGAGE_KEYS.filter(({ id }) => !described || profile.actions[id]).map(({ id, label }) => el('tr', null,
+        el('td', null, profile.actions[id] || label), el('td', null, label), el('td', null, names(id, 'keyboard')), el('td', null, names(id, 'gamepad'))))))),
+    el('ul', null, (profile.notes || []).map((note) => el('li', null, el('span'), el('span', null, note)))));
+  if (profile.source) parts.push(el('p', { class: 'hint' }, `Where these controls come from: ${profile.source}`));
+  if (game && !game.hasControls && profile === STANDARD_PROFILE) {
+    parts.push(el('p', { class: 'hint' }, 'Nobody has written down what the keys do in this game yet, so this is the phone\'s own layout. Its help or options screen usually lists them.'));
+  }
+  parts.push(el('p', { class: 'hint' }, `On a touch screen the same N-Gage keys are on screen: the pad, OK and C on the left, the two soft keys above, and the number keys on the right${described ? ', labelled with what they do in this game' : ''}. `
+    + 'Change any binding under Menu → Controls. A gamepad is picked up when you press a button on it.'));
 
-  $('guide-body').innerHTML = `
-    <h3>Controls: ${escapeHtml(profile.name)}</h3>
-    <div class="table-wrap"><table>
-      <thead><tr><th>${profile === STANDARD_PROFILE ? 'Key' : 'Action'}</th><th>N-Gage key</th><th>Keyboard</th><th>Gamepad</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>
-    <ul>${notes}</ul>
-    <p class="hint">On a touch screen the same N-Gage keys are on screen: the pad, OK and C on the left, the two soft keys above, and the number keys on the right${profile === STANDARD_PROFILE ? '' : ', labelled with what they do in this game'}.
-    Change any binding under Menu → Controls. A gamepad is picked up when you press a button on it.</p>
-
+  $('guide-body').replaceChildren(...parts);
+  $('guide-body').insertAdjacentHTML('beforeend', `
     <h3>Loading a game</h3>
     <ul>
       <li><span></span><span>You need two files of your own: an N-Gage firmware (ROM) dump and a game card dump packed as .zip. The firmware is installed once and kept.</span></li>
@@ -577,7 +678,7 @@ function renderGuide() {
       <li><span></span><span><b>Menu → Display</b> chooses how the ${page.screen.width}×${page.screen.height} game picture is scaled: sharp pixels, smooth, FSR 1.0, pixel-art scalers and screen effects.</span></li>
       <li><span></span><span>FSR 2 cannot be used: it is a temporal upscaler that needs depth and motion data from a 3D renderer, and the emulator only receives the game's finished frames. FSR 1.0 is the spatial version that works on any image.</span></li>
       <li><span></span><span>None of these change the game's speed, which depends on your device's processor.</span></li>
-    </ul>`;
+    </ul>`);
 }
 
 // --- session controls ----------------------------------------------------------------
@@ -592,6 +693,7 @@ function refreshControls() {
   $('m-mute').disabled = !page.emu;
   $('m-mute').textContent = page.muted ? 'Unmute' : 'Mute';
   $('m-link').disabled = !shareLink();
+  showGameTitle();
 }
 
 async function setPaused(paused, byUser) {
@@ -672,6 +774,32 @@ function wireControls() {
   });
   entry('m-guide', () => { renderGuide(); $('guide').showModal(); });
   entry('m-info', showInfo);
+
+  // Links back to the site this page is part of; a bare player has none.
+  siteLinks().then((links) => {
+    for (const [id, url] of [['m-home', links.home], ['m-docs', links.docs]]) {
+      if (!url) continue;
+      $(id).href = url;
+      $(id).hidden = false;
+    }
+  });
+  $('m-docs').addEventListener('click', () => $('menu').close());
+  // Leaving for the list of games ends this one: stop it and store what it
+  // saved first, because a page that is going away may not get to finish a
+  // storage pass. A pass takes a fraction of a second, except the first one of
+  // a first visit, which copies the firmware and the card; nobody leaving is
+  // made to wait for that one.
+  $('m-home').addEventListener('click', (event) => {
+    if (!page.emu || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    const target = $('m-home').href;
+    $('menu').close();
+    const patience = new Promise((resolve) => setTimeout(resolve, 5000));
+    setPaused(true, true).catch(() => {})
+      .then(() => { setStatus('Saving…'); return Promise.race([page.emu.save(), patience]); })
+      .catch(() => {})
+      .then(() => location.assign(target));
+  });
 
   // A hidden tab gets no animation frames, so the game cannot be shown anyway:
   // pause it, flush saves, and pick up again when the tab returns.

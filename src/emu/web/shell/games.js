@@ -10,7 +10,8 @@
 //
 // The standard profile mirrors the phone. A game profile adds what each N-Gage
 // key does in that game (shown in the guide and on the touch keys) and a
-// layout that suits it.
+// layout that suits it. Game profiles come from the hosting site's catalogue
+// (profileFromEntry); the ones written out here serve a page without one.
 
 // Every key of the N-Gage, in the order the controls table lists them.
 export const NGAGE_KEYS = [
@@ -93,7 +94,119 @@ export const GAME_PROFILES = {
 };
 
 export function profileFor(uid) {
-  return GAME_PROFILES[uid] || STANDARD_PROFILE;
+  return Object.hasOwn(GAME_PROFILES, uid) ? GAME_PROFILES[uid] : STANDARD_PROFILE;
+}
+
+// --- profiles from the site's catalogue ------------------------------------------
+//
+// A catalogue entry (see catalog.js) is JSON fetched from the hosting site.
+// Nothing in it is taken on trust: only known N-Gage keys, inputs of the right
+// shape and plain strings of a sane length get through, and everything else is
+// dropped as if it had not been written.
+
+const KEY_IDS = NGAGE_KEYS.map((key) => key.id);
+const INPUT_SHAPE = {
+  keyboard: /^[A-Z][A-Za-z0-9]{0,31}$/, // KeyboardEvent.code
+  gamepad: /^(b\d{1,2}|a\d[+-])$/,
+};
+const MAX_INPUTS = 8; // per N-Gage key
+const MAX_NOTES = 24;
+
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+function text(value, limit) {
+  if (typeof value !== 'string') return '';
+  const clean = value.replace(/\s+/g, ' ').trim();
+  return clean.length > limit ? `${clean.slice(0, limit - 1)}…` : clean;
+}
+
+function textList(value, limit) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => text(item, limit)).filter(Boolean).slice(0, MAX_NOTES);
+}
+
+// One binding table. A map that is not there means the standard layout. In a
+// map that is there, a key it leaves out keeps its standard inputs except
+// those the map gives to another key: a layout that moves "walk" to W must not
+// leave W pressing the right soft key as well.
+function layout(given, device) {
+  const standard = STANDARD_PROFILE[device];
+  const table = {};
+  const taken = new Set();
+
+  if (isRecord(given)) {
+    for (const id of KEY_IDS) {
+      if (!Object.hasOwn(given, id) || !Array.isArray(given[id])) continue;
+      const inputs = [...new Set(given[id].filter((input) => typeof input === 'string' && INPUT_SHAPE[device].test(input)))].slice(0, MAX_INPUTS);
+      // An empty list unbinds the key on purpose. A list with nothing usable
+      // in it is a mistake, and the key keeps its standard inputs.
+      if (!inputs.length && given[id].length) continue;
+      table[id] = inputs;
+      for (const input of inputs) taken.add(input);
+    }
+  }
+
+  for (const id of KEY_IDS) {
+    if (!table[id]) table[id] = (standard[id] || []).filter((input) => !taken.has(input));
+  }
+  return table;
+}
+
+// The control profile a catalogue entry describes, or null when it has none
+// (or none that can be used). Its id is the entry's slug, which is also what
+// rebindings the user saved are filed under.
+export function profileFromEntry(entry) {
+  if (!isRecord(entry) || !isRecord(entry.controls)) return null;
+  const id = typeof entry.slug === 'string' && /^[a-z0-9-]{1,64}$/.test(entry.slug) ? entry.slug : '';
+  // "auto" and the standard profile's id mean something else in the settings.
+  if (!id || id === 'auto' || id === STANDARD_PROFILE.id) return null;
+
+  const { controls } = entry;
+  const actions = {};
+  if (isRecord(controls.actions)) {
+    for (const key of KEY_IDS) {
+      const action = Object.hasOwn(controls.actions, key) ? text(controls.actions[key], 80) : '';
+      if (action) actions[key] = action;
+    }
+  }
+  // Nothing about the keys and no layout of its own: not a profile.
+  if (!Object.keys(actions).length && !isRecord(controls.keyboard) && !isRecord(controls.gamepad)) return null;
+
+  return {
+    id,
+    name: text(entry.title, 80) || id,
+    actions,
+    keyboard: layout(controls.keyboard, 'keyboard'),
+    gamepad: layout(controls.gamepad, 'gamepad'),
+    notes: [...textList(controls.notes, 400), ...textList(entry.notes, 400)],
+    source: text(controls.source, 300),
+  };
+}
+
+// How far a game gets, in words a player reads before wondering why something
+// fails. `fallback` stands in when the entry has no note of its own; `tone` is
+// the colour class the label is shown in.
+const STATUS_WORDS = {
+  untested: { label: 'Not tested yet', tone: 'warn', fallback: 'Nobody has checked how far this game gets here. It may not start, or it may stop part-way.' },
+  broken: { label: 'Does not work', tone: 'bad', fallback: 'It does not start, or it crashes.' },
+  boots: { label: 'Starts only', tone: 'warn', fallback: 'It shows its own screens but does not reach a working main menu.' },
+  menu: { label: 'Menus only', tone: 'warn', fallback: 'Its main menu works; the game itself does not yet.' },
+  ingame: { label: 'Playable', tone: 'ok', fallback: '' },
+};
+
+// What the catalogue says about a game, for the status line and the guide:
+// { title, about, status: { label, tone, note } | null }, any of them empty
+// when the entry does not say; null when it is not an entry at all.
+export function gameFacts(entry) {
+  if (!isRecord(entry)) return null;
+  const words = typeof entry.status === 'string' && Object.hasOwn(STATUS_WORDS, entry.status) ? STATUS_WORDS[entry.status] : null;
+  const year = Number.isInteger(entry.year) && entry.year > 1990 && entry.year < 2100 ? String(entry.year) : '';
+
+  return {
+    title: text(entry.title, 80),
+    about: [text(entry.publisher, 60), year, text(entry.genre, 60)].filter(Boolean).join(' · '),
+    status: words ? { label: words.label, tone: words.tone, note: text(entry.statusNote, 400) || words.fallback } : null,
+  };
 }
 
 // Human-readable names for bound inputs.
