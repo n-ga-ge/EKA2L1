@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -51,6 +52,53 @@ namespace eka2l1::web::persist {
 
         // What the store currently holds, keyed by path relative to the root.
         std::map<std::string, signature> saved;
+
+        // Parts of the data tree that are not kept, because the page builds
+        // them again every session from the firmware and the game card it
+        // downloaded (and caches itself): the installed ROM, the ROM's files
+        // on Z:, the card on E: and the device list that points at them.
+        // Together they are thousands of files, and bringing those back from
+        // OPFS one by one took seconds on every visit, more with each game
+        // ever played. What remains is what a visitor creates: the phone's
+        // own memory (C:), where games keep their saves.
+        constexpr const char *REBUILT[] = { "roms", "drives/z", "drives/e", "devices.yml" };
+
+        bool rebuilt(const std::string &name) {
+            for (const char *prefix : REBUILT) {
+                const std::size_t length = std::strlen(prefix);
+                if (name.compare(0, length, prefix) == 0 && (name.size() == length || name[length] == '/')) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Rebuilt parts a store written by an earlier version still holds.
+        // They are never read; start() has them deleted.
+        std::vector<fs::path> stale;
+
+        // Calls `visit(path, name)` for every kept regular file under `root`,
+        // without descending into the rebuilt parts. `skipped`, when given,
+        // collects those.
+        template <typename F>
+        void walk_kept(const fs::path &root, F &&visit, std::vector<fs::path> *skipped = nullptr) {
+            std::error_code ec;
+            for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                const std::string name = fs::relative(it->path(), root, ec).generic_string();
+                if (rebuilt(name)) {
+                    if (skipped) {
+                        skipped->push_back(it->path());
+                    }
+                    if (it->is_directory(ec)) {
+                        it.disable_recursion_pending();
+                    }
+                    continue;
+                }
+                if (it->is_regular_file(ec)) {
+                    visit(it->path(), name);
+                }
+            }
+        }
 
         bool mount() {
             if (!mounted) {
@@ -195,13 +243,9 @@ namespace eka2l1::web::persist {
             std::map<std::string, signature> current;
 
             if (fs::exists(live_root, ec)) {
-                for (auto it = fs::recursive_directory_iterator(live_root, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-                    if (!it->is_regular_file(ec)) {
-                        continue;
-                    }
-                    signature sig{ it->file_size(ec), it->last_write_time(ec) };
-                    current.emplace(fs::relative(it->path(), live_root, ec).generic_string(), sig);
-                }
+                walk_kept(live_root, [&](const fs::path &path, const std::string &name) {
+                    current.emplace(name, signature{ fs::file_size(path, ec), fs::last_write_time(path, ec) });
+                });
             }
 
             // Stage every new or changed file.
@@ -272,21 +316,16 @@ namespace eka2l1::web::persist {
         }
 
         std::size_t restored = 0;
-        for (auto it = fs::recursive_directory_iterator(STORE_ROOT, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-            if (!it->is_regular_file(ec)) {
-                continue;
-            }
-
-            const std::string name = fs::relative(it->path(), STORE_ROOT, ec).generic_string();
+        walk_kept(STORE_ROOT, [&](const fs::path &path, const std::string &name) {
             const fs::path target = fs::path(live_root) / name;
 
-            if (mirror_file(it->path(), target)) {
+            if (mirror_file(path, target)) {
                 // Record the live copy's signature so the first pass does not
                 // write everything straight back.
                 saved[name] = signature{ fs::file_size(target, ec), fs::last_write_time(target, ec) };
                 restored++;
             }
-        }
+        }, &stale);
 
         return restored > 0;
     }
@@ -294,6 +333,20 @@ namespace eka2l1::web::persist {
     void start(const std::string &live_root, std::function<void(std::uint64_t)> on_pass) {
         if (!mounted) {
             return;
+        }
+
+        if (!stale.empty()) {
+            // On a thread of its own, so that deleting thousands of files does
+            // not hold up the first passes. Not journalled: nothing reads
+            // these, and whatever a closed tab leaves behind is found and
+            // deleted on the next visit.
+            std::thread([paths = std::move(stale)] {
+                for (const fs::path &path : paths) {
+                    std::error_code ec;
+                    fs::remove_all(path, ec);
+                }
+            }).detach();
+            stale.clear();
         }
 
         std::thread([live_root, on_pass = std::move(on_pass)] {

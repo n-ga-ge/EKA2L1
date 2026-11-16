@@ -5,7 +5,9 @@
 // firmware and game it is given, and wires up input, display options, saves
 // and the session controls.
 //
-// A game can be loaded three ways:
+// A game can be loaded four ways:
+//   - ?g=<slug>, on a site with a game catalogue (see catalog.js): the game
+//     and the firmware come from the site
 //   - URL parameters, for links that start the game by themselves:
 //       ?fw=<url>     N-Gage firmware ROM dump (needed once; it is kept)
 //       ?game=<url>   game card dump (.zip/.7z/.rar)
@@ -18,15 +20,17 @@
 // Other parameters:
 //   ?log=<filter> emulator log filter (default *:warn), e.g. *:info
 //   ?persist=0    keep nothing between visits
+//   ?cache=<MB>   size bound of the download cache (see loader.js)
 //   ?touch=1|0    force the on-screen controls on or off
 //   ?fps=1        show frames per second in the status line
 //
 // Firmware and game are fetched with CORS, so their server must allow this
-// origin.
+// origin. loader.js fetches and keeps them; this file installs them.
 
 import { Eka2l1 } from './eka2l1-client.js';
 import { NGAGE_KEYS, STANDARD_PROFILE, keyName, padName } from './games.js';
 import { Input } from './input.js';
+import { Downloads, LoadError, beginLoad, fileSource, wantedFromParams } from './loader.js';
 import { autoProfile, gameProfiles, lookUpGame, lookUpProfile, profileById, siteLinks, switchBindings } from './profiles.js';
 import { downloadBlob, exportFileName, exportSaves, importSaves, listSaves } from './saves.js';
 import { saveSettings, settings } from './settings.js';
@@ -45,8 +49,9 @@ const page = {
   input: null,
   support: null,
   site: null, // config.json, when the host provides one
+  downloads: null, // promise of the download cache (loader.js)
   app: null, // { uid, name } of the running game
-  source: null, // { fw, game } URLs the running game came from
+  source: null, // { fw, game } URLs the running game came from, or { slug }
   screen: { width: 176, height: 208 },
   paused: false,
   userPaused: false,
@@ -72,56 +77,91 @@ function escapeHtml(text) {
 
 // --- downloads and installs ----------------------------------------------------
 
-function checkedUrl(url, label) {
-  let parsed;
-  try {
-    parsed = new URL(url, location.href);
-  } catch {
-    throw new Error(`${label}: "${url}" is not a URL`);
-  }
-  if (!/^https?:$/.test(parsed.protocol)) throw new Error(`${label}: only http(s) URLs are allowed`);
-  return parsed;
+// What the status line says while a game loads: the step being worked on,
+// then one entry per file still on its way (how much has arrived, or that it
+// was already on this device).
+const progress = { step: '', load: null };
+
+function showProgress() {
+  setStatus([progress.step, ...(progress.load ? progress.load.summary() : [])].filter(Boolean).join(' · '));
 }
 
-async function fetchBytes(url, label) {
-  const target = checkedUrl(url, label);
+function showStep(step) {
+  progress.step = step;
+  showProgress();
+}
 
-  let response;
-  try {
-    response = await fetch(target, { mode: 'cors', credentials: 'omit' });
-  } catch {
-    throw new Error(`${label}: could not download ${target.host}${target.pathname}. The server must be reachable and allow this site (CORS).`);
-  }
-  if (!response.ok) throw new Error(`${label}: download failed (${response.status})`);
+// Starts fetching what `wanted` names ({ slug } or { fw, game }) and returns
+// the load at once; finishLoad() installs it. `firmware: false` leaves the
+// firmware out, for when one is installed already.
+function startLoad(wanted, firmware = true) {
+  const load = beginLoad(wanted, { downloads: page.downloads, firmware, onProgress: () => { if (progress.load === load) showProgress(); } });
+  progress.load = load;
+  return load;
+}
 
-  const total = Number(response.headers.get('Content-Length')) || 0;
-  const reader = response.body.getReader();
-  const chunks = [];
-  let received = 0;
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    setStatus(total ? `${label}: ${Math.round((received / total) * 100)}%` : `${label}: ${(received / 1048576).toFixed(1)} MB`);
-  }
-
-  const bytes = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-  return bytes;
+function stopLoad(load) {
+  if (load) load.cancel();
+  if (progress.load === load) progress.load = null;
 }
 
 async function hasDevice() {
   return (await page.emu.call('GET', '/v1/devices')).devices.length > 0;
 }
 
-async function installFirmware(bytes) {
-  setStatus('Installing firmware…');
-  const path = await page.emu.upload('firmware.rom', bytes);
-  await page.emu.call('POST', '/v1/devices', { rom: path });
-  await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/firmware.rom')}`);
+// Whether a firmware is at hand: installed in this session, or kept from an
+// earlier one.
+async function firmwareReady() {
+  return (await hasDevice()) || Boolean(await (await page.downloads).firmware());
+}
+
+// `source` is something Eka2l1.uploadFrom takes: a stored download or a file.
+async function installFirmware(source) {
+  showStep('Installing firmware…');
+  const downloads = await page.downloads;
+  try {
+    const path = await page.emu.uploadFrom('firmware.rom', source);
+    await page.emu.call('POST', '/v1/devices', { rom: path });
+  } catch (error) {
+    // Not a firmware the emulator can use: do not offer it again.
+    if (source.key) await downloads.remove(source.key);
+    throw error;
+  } finally {
+    await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/firmware.rom')}`);
+  }
+  if (source.key) await downloads.rememberFirmware(source.key);
+  performance.mark('eka2l1:firmware-installed');
+}
+
+// Installs the firmware unless this session has one: the picked `file` when
+// there is one, else the one kept from an earlier visit.
+async function ensureDevice(file = null) {
+  if (await hasDevice()) return;
+  const downloads = await page.downloads;
+  if (file) {
+    await installFirmware(fileSource(file));
+    // Kept so it is only asked for once.
+    downloads.keepFirmware(file).catch((error) => console.warn('firmware not kept:', error));
+    return;
+  }
+  const stored = await downloads.firmware();
+  if (!stored) throw new LoadError('no-firmware', 'Choose an N-Gage firmware dump too; none is installed yet.');
+  await installFirmware(stored);
+}
+
+// Empties the card slot (drive E:). A session starts with no card, so this
+// only has work to do when a second game is loaded in one session, or with
+// data stored by an earlier build, which kept every card ever inserted.
+async function removeCard() {
+  const listing = await page.emu.request('GET', `/v1/files?path=${encodeURIComponent('E:/')}`);
+  const entries = listing.ok ? listing.json().entries || [] : [];
+  if (!entries.length) return;
+  for (const entry of entries) {
+    await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('E:/' + entry.name)}&recursive=1`);
+  }
+  // Remounting the drive makes the emulator read it again and forget the
+  // game that was on it.
+  await page.emu.request('DELETE', '/v1/card');
 }
 
 async function launch(app) {
@@ -141,74 +181,87 @@ async function launch(app) {
   refreshControls();
 }
 
-async function installAndLaunch(bytes, name, sourceKey = null) {
-  setStatus('Installing game…');
-  const path = await page.emu.upload(name, bytes);
-  const installed = await page.emu.call('POST', '/v1/apps', { path, type: 'ngage' });
-  await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/' + name)}`);
-  const app = installed.added[0] || (await page.emu.call('GET', '/v1/apps')).apps[0];
+// Puts a card dump in the slot and starts the game on it. `expected` is what
+// the catalogue says about the game ({ title, uid }), when it is known.
+async function installAndLaunch(source, name, expected = null) {
+  showStep(`Installing ${expected && expected.title ? expected.title : 'game'}…`);
+  await removeCard();
+
+  let installed;
+  try {
+    const path = await page.emu.uploadFrom(name, source);
+    installed = await page.emu.call('POST', '/v1/apps', { path, type: 'ngage' });
+  } catch (error) {
+    // Not a card dump the emulator can use: fetch it afresh next time.
+    if (source.key) await (await page.downloads).remove(source.key);
+    throw error;
+  } finally {
+    await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/' + name)}`);
+  }
+
+  // The card holds one game; the catalogue's UID settles it if the emulator
+  // lists more than one new app.
+  const apps = installed.added.length ? installed.added : (await page.emu.call('GET', '/v1/apps')).apps;
+  const uid = expected && expected.uid ? String(expected.uid).toLowerCase() : null;
+  const app = apps.find((item) => String(item.uid).toLowerCase() === uid) || apps[0];
   if (!app) throw new Error('No game was found on the card dump');
 
-  if (sourceKey) rememberGame(sourceKey, app.uid);
-  page.emu.save(); // keep the installed game for the next visit
+  performance.mark('eka2l1:game-installed');
+  progress.load = null; // from here the status line belongs to the game
   await launch(app);
 }
 
-// Which installed game a URL produced, so a repeat visit can skip the download.
-const gameKey = (url) => 'eka2l1.game.' + new URL(url, location.href).href;
+// Installs what a load fetched (see startLoad) and starts the game.
+async function finishLoad(load) {
+  progress.load = load;
+  try {
+    showStep('Loading…');
+    const target = await load.target;
 
-function rememberGame(url, uid) {
-  try { localStorage.setItem(gameKey(url), uid); } catch { /* storage disabled */ }
-}
+    if (!(await hasDevice())) {
+      const firmware = await load.firmware;
+      if (!firmware) throw new LoadError('no-firmware', 'Enter the URL of an N-Gage firmware dump too; none is installed yet.');
+      await installFirmware(firmware);
+    }
+    load.installed('fw');
 
-async function findInstalledGame(url) {
-  let uid = null;
-  try { uid = localStorage.getItem(gameKey(url)); } catch { /* storage disabled */ }
-  if (!uid) return null;
+    showStep('Loading…');
+    const card = await load.card;
+    await installAndLaunch(card, target.name, target);
+    load.installed('game');
 
-  // Right after boot the guest is still scanning its app registries; give it
-  // a moment before deciding the game is gone.
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const { apps } = await page.emu.call('GET', '/v1/apps');
-    const found = apps.find((app) => app.uid === uid);
-    if (found) return found;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (target.slug) {
+      page.source = { slug: target.slug };
+    } else {
+      page.source = { fw: load.wanted.fw || '', game: target.gameUrl };
+      settings.urls = { fw: load.wanted.fw || settings.urls.fw, game: target.gameUrl };
+      saveSettings();
+    }
+  } catch (error) {
+    stopLoad(load);
+    throw error;
   }
-  return null;
-}
-
-// Loads firmware (if none is installed yet) and a game from URLs, then starts it.
-async function loadFromUrls(fwUrl, gameUrl) {
-  if (!gameUrl) throw new Error('Enter the URL of a game card dump.');
-  checkedUrl(gameUrl, 'Game');
-
-  const deviceReady = await hasDevice();
-  if (!deviceReady) {
-    if (!fwUrl) throw new Error('Enter the URL of an N-Gage firmware dump too; none is installed yet.');
-    await installFirmware(await fetchBytes(fwUrl, 'Firmware'));
-  }
-
-  const installed = deviceReady ? await findInstalledGame(gameUrl) : null;
-  if (installed) {
-    await launch(installed);
-  } else {
-    const name = new URL(gameUrl, location.href).pathname.split('/').pop() || 'game.zip';
-    await installAndLaunch(await fetchBytes(gameUrl, 'Game'), name, gameUrl);
-  }
-
-  page.source = { fw: fwUrl || '', game: gameUrl };
-  settings.urls = { fw: fwUrl || settings.urls.fw, game: gameUrl };
-  saveSettings();
+  load.finished().catch(() => {});
 
   overlay.textContent = page.support.mobile ? 'Tap for sound' : 'Click or press a key for sound';
   overlay.hidden = Boolean(page.emu.audio);
   refreshControls();
 }
 
+// Loads firmware (if none is installed yet) and a game from URLs, then starts it.
+async function loadFromUrls(fwUrl, gameUrl) {
+  if (!gameUrl) throw new Error('Enter the URL of a game card dump.');
+  await finishLoad(startLoad({ fw: fwUrl || '', game: gameUrl }, !(await hasDevice())));
+}
+
 // A link that loads the running game by itself.
 function shareLink() {
   if (!page.source) return null;
   const link = new URL(location.pathname, location.href);
+  if (page.source.slug) {
+    link.searchParams.set('g', page.source.slug);
+    return link.href;
+  }
   if (page.source.fw) link.searchParams.set('fw', page.source.fw);
   link.searchParams.set('game', page.source.game);
   return link.href;
@@ -216,18 +269,23 @@ function shareLink() {
 
 // --- setup panel -----------------------------------------------------------------
 
-async function showSetup() {
-  const deviceReady = await hasDevice();
+// Shows the firmware inputs only while no firmware is at hand.
+async function showFirmwareInputs() {
+  const deviceReady = await firmwareReady();
   $('fw-row').hidden = deviceReady;
   $('fw-url-row').hidden = deviceReady;
+  $('setup-note').textContent = deviceReady
+    ? 'The firmware is already installed. Choose a game card dump.'
+    : 'You need an N-Gage firmware (ROM) dump and a game card dump. The firmware is only needed once.';
+  return deviceReady;
+}
+
+async function showSetup() {
+  const deviceReady = await showFirmwareInputs();
 
   const site = page.site || {};
   $('fw-url').value = params.get('fw') || settings.urls.fw || site.fw || '';
   $('game-url').value = params.get('game') || settings.urls.game || site.game || '';
-
-  $('setup-note').textContent = deviceReady
-    ? 'The firmware is already installed. Choose a game card dump.'
-    : 'You need an N-Gage firmware (ROM) dump and a game card dump. The firmware is only needed once.';
 
   const play = $('btn-play');
   play.hidden = !(site.game && (deviceReady || site.fw));
@@ -246,6 +304,8 @@ function wireSetup() {
     } catch (error) {
       reportError(error);
       setup.hidden = false;
+      // A kept firmware that failed to install is gone now: ask for one.
+      showFirmwareInputs().catch(() => {});
     }
   };
 
@@ -275,12 +335,12 @@ function wireSetup() {
     run(async () => {
       const fwFile = $('fw-file').files[0];
       const gameFile = $('game-file').files[0];
-      const deviceReady = await hasDevice();
+      const deviceReady = await firmwareReady();
       if (!gameFile) throw new Error('Choose a game card dump.');
       if (!deviceReady && !fwFile) throw new Error('Choose an N-Gage firmware dump too; none is installed yet.');
 
-      if (!deviceReady) await installFirmware(new Uint8Array(await fwFile.arrayBuffer()));
-      await installAndLaunch(new Uint8Array(await gameFile.arrayBuffer()), gameFile.name);
+      await ensureDevice(fwFile);
+      await installAndLaunch(fileSource(gameFile), gameFile.name);
       page.source = null;
       refreshControls();
     })();
@@ -889,6 +949,13 @@ async function main() {
   wireControls();
   wireSetup();
 
+  // Start fetching what the address names before anything else: the
+  // downloads then run while the emulator is compiled and started.
+  const persist = params.get('persist') !== '0';
+  page.downloads = Downloads.open({ persist, limitMB: params.has('cache') ? Number(params.get('cache')) : null });
+  const wanted = wantedFromParams(params);
+  const early = wanted ? startLoad(wanted) : null;
+
   [page.support, page.site] = await Promise.all([detectSupport(), loadSiteConfig()]);
 
   const wantTouch = params.get('touch');
@@ -897,6 +964,7 @@ async function main() {
   }
 
   if (!page.support.ok) {
+    stopLoad(early);
     const missing = page.support.required.filter((item) => !item.ok);
     setStatus(`This browser cannot run the emulator: ${missing.map((item) => item.name + (item.detail ? ' (' + item.detail + ')' : '')).join('; ')}.`, true);
     return;
@@ -906,8 +974,13 @@ async function main() {
   page.emu = emu;
   window.eka2l1 = emu;
 
-  setStatus('Starting emulator…');
-  await emu.start({ canvas, persist: params.get('persist') !== '0' });
+  showStep('Starting emulator…');
+  try {
+    await emu.start({ canvas, persist });
+  } catch (error) {
+    stopLoad(early);
+    throw error;
+  }
 
   page.input = new Input((scancode, down) => { if (!page.paused) emu.key(scancode, down); });
   page.input.attachKeyboard();
@@ -927,16 +1000,16 @@ async function main() {
     await emu.call('PATCH', '/v1/config', { logFilter: params.get('log') });
   }
 
-  const fwUrl = params.get('fw');
-  const gameUrl = params.get('game');
-
-  if (gameUrl && (fwUrl || await hasDevice())) {
+  if (early) {
     try {
-      await loadFromUrls(fwUrl || '', gameUrl);
+      await finishLoad(early);
     } catch (error) {
-      reportError(error);
+      // A game address without a firmware, where none is kept, opens the
+      // loader without complaint, as a bare address does.
+      const quiet = error.code === 'no-firmware' && !wanted.slug;
+      if (!quiet) reportError(error);
       await showSetup();
-      setStatus(String(error.message || error), true);
+      if (!quiet) setStatus(String(error.message || error), true);
     }
     return;
   }
