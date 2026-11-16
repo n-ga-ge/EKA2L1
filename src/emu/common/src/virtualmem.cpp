@@ -24,6 +24,14 @@
 
 #include <cstdint>
 
+#if EKA2L1_PLATFORM(WEB)
+#include <algorithm>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <vector>
+#endif
+
 #if EKA2L1_PLATFORM(WIN32)
 #include <Windows.h>
 #elif EKA2L1_PLATFORM(UNIX) || EKA2L1_PLATFORM(DARWIN)
@@ -79,8 +87,131 @@ namespace eka2l1::common {
     }
 #endif
 
+#if EKA2L1_PLATFORM(WEB)
+    // Address-space reservations for the browser build.
+    //
+    // Emscripten's mmap() allocates and zero-fills the whole range at once, so
+    // reserving a guest chunk's maximum size (tens of megabytes each, most of it
+    // never used) would cost that much real memory. Reservations are carved
+    // from the end of the wasm heap instead: memory obtained by growing the
+    // heap is zero and is not backed by physical pages until first written, and
+    // the allocator never gives heap back, so it stays that way. Committing a
+    // page is then free, and only pages that were actually committed need
+    // clearing before a range is handed out again.
+    namespace web_reserve {
+        constexpr std::size_t TRACK = 0x1000; // guest page: the unit chunks commit in
+        constexpr std::size_t ALIGN = 0x10000;
+
+        struct block {
+            std::size_t size;
+            std::vector<bool> used; // one flag per TRACK bytes
+        };
+
+        std::mutex lock;
+        std::map<std::uintptr_t, block> live;
+        std::multimap<std::size_t, std::uintptr_t> spare;
+
+        std::map<std::uintptr_t, block>::iterator find(const std::uintptr_t addr) {
+            auto it = live.upper_bound(addr);
+            if (it == live.begin()) {
+                return live.end();
+            }
+            --it;
+            return (addr < it->first + it->second.size) ? it : live.end();
+        }
+
+        void *reserve(std::size_t size) {
+            size = (size + ALIGN - 1) & ~(ALIGN - 1);
+
+            const std::lock_guard<std::mutex> guard(lock);
+            std::uintptr_t addr = 0;
+
+            const auto reuse = spare.find(size);
+            if (reuse != spare.end()) {
+                addr = reuse->second;
+                spare.erase(reuse);
+            } else {
+                void *raw = sbrk(static_cast<intptr_t>(size + ALIGN));
+                if (raw == reinterpret_cast<void *>(-1)) {
+                    return nullptr;
+                }
+                addr = (reinterpret_cast<std::uintptr_t>(raw) + ALIGN - 1) & ~static_cast<std::uintptr_t>(ALIGN - 1);
+            }
+
+            live.emplace(addr, block{ size, std::vector<bool>(size / TRACK, false) });
+            return reinterpret_cast<void *>(addr);
+        }
+
+        // Clears [first, last) page flags, zeroing the pages that were in use.
+        void scrub(const std::uintptr_t base, block &blk, std::size_t first, const std::size_t last) {
+            while (first < last) {
+                if (!blk.used[first]) {
+                    first++;
+                    continue;
+                }
+                std::size_t end = first;
+                while (end < last && blk.used[end]) {
+                    blk.used[end++] = false;
+                }
+                std::memset(reinterpret_cast<void *>(base + first * TRACK), 0, (end - first) * TRACK);
+                first = end;
+            }
+        }
+
+        bool release(void *ptr) {
+            const std::lock_guard<std::mutex> guard(lock);
+            const auto it = live.find(reinterpret_cast<std::uintptr_t>(ptr));
+            if (it == live.end()) {
+                return false;
+            }
+
+            scrub(it->first, it->second, 0, it->second.used.size());
+            spare.emplace(it->second.size, it->first);
+            live.erase(it);
+            return true;
+        }
+
+        // Returns false when the range is not one of ours (a file mapping, say).
+        bool touch(void *ptr, const std::size_t size, const bool in_use) {
+            const std::lock_guard<std::mutex> guard(lock);
+            const std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(ptr);
+            const auto it = find(addr);
+            if (it == live.end()) {
+                return false;
+            }
+
+            const std::size_t offset = addr - it->first;
+            const std::size_t last = std::min((offset + size + TRACK - 1) / TRACK, it->second.used.size());
+
+            if (in_use) {
+                for (std::size_t page = offset / TRACK; page < last; page++) {
+                    it->second.used[page] = true;
+                }
+            } else {
+                // Only whole pages inside the range go away; a decommitted
+                // page reads as zero when it is committed again.
+                const std::size_t first = (offset + TRACK - 1) / TRACK;
+                const std::size_t whole_last = std::min((offset + size) / TRACK, it->second.used.size());
+                if (first < whole_last) {
+                    scrub(it->first, it->second, first, whole_last);
+                }
+            }
+
+            return true;
+        }
+    }
+#endif
+
+#if EKA2L1_PLATFORM(WEB)
+    // Sizes of live file mappings, which munmap() needs back.
+    static std::mutex web_file_maps_lock;
+    static std::map<void *, std::size_t> web_file_maps;
+#endif
+
     void *map_memory(const std::size_t size) {
-#if EKA2L1_PLATFORM(WIN32)
+#if EKA2L1_PLATFORM(WEB)
+        return web_reserve::reserve(size);
+#elif EKA2L1_PLATFORM(WIN32)
         return VirtualAlloc(nullptr, size,
             MEM_RESERVE, PAGE_NOACCESS);
 #else
@@ -90,6 +221,11 @@ namespace eka2l1::common {
     }
 
     bool unmap_memory(void *ptr, const std::size_t size) {
+#if EKA2L1_PLATFORM(WEB)
+        if (web_reserve::release(ptr)) {
+            return true;
+        }
+#endif
 #if EKA2L1_PLATFORM(WIN32)
         const auto result = VirtualFree(ptr, 0, MEM_RELEASE);
 
@@ -106,6 +242,12 @@ namespace eka2l1::common {
     }
 
     bool commit(void *ptr, const std::size_t size, const prot commit_prot) {
+#if EKA2L1_PLATFORM(WEB)
+        // There is no page protection in wasm; just note what is in use.
+        if (web_reserve::touch(ptr, size, true)) {
+            return true;
+        }
+#endif
 #if EKA2L1_PLATFORM(WIN32)
         DWORD oldprot = 0;
 
@@ -129,6 +271,11 @@ namespace eka2l1::common {
     }
 
     bool decommit(void *ptr, const std::size_t size) {
+#if EKA2L1_PLATFORM(WEB)
+        if (web_reserve::touch(ptr, size, false)) {
+            return true;
+        }
+#endif
 #if EKA2L1_PLATFORM(WIN32)
         const auto res = VirtualFree(ptr, size, MEM_DECOMMIT);
 
@@ -305,6 +452,13 @@ namespace eka2l1::common {
         }
 
         auto map_ptr = mmap(nullptr, map_size, prot_mode, MAP_PRIVATE, file_handle, 0);
+
+#if EKA2L1_PLATFORM(WEB)
+        if (map_ptr != MAP_FAILED) {
+            const std::lock_guard<std::mutex> guard(web_file_maps_lock);
+            web_file_maps[map_ptr] = map_size;
+        }
+#endif
 #endif
 
         return map_ptr;
@@ -313,6 +467,20 @@ namespace eka2l1::common {
     bool unmap_file(void *ptr) {
 #if EKA2L1_PLATFORM(WIN32)
         UnmapViewOfFile(ptr);
+#elif EKA2L1_PLATFORM(WEB)
+        // A file mapping is a heap copy of the file here, so leaving it mapped
+        // is a real leak (the 18 MB ROM, once per emulator reset).
+        std::size_t size = 0;
+        {
+            const std::lock_guard<std::mutex> guard(web_file_maps_lock);
+            const auto it = web_file_maps.find(ptr);
+            if (it == web_file_maps.end()) {
+                return true;
+            }
+            size = it->second;
+            web_file_maps.erase(it);
+        }
+        munmap(ptr, size);
 #endif
 
         return true;

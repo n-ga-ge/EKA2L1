@@ -68,15 +68,19 @@ add_dependencies(eka2l1_web_assets
         vibractrl backlightctrl postingsurfacefactory goommonitor ssl commdb)
 add_dependencies(eka2l1_web eka2l1_web_assets)
 
-# The page itself: static files served next to the generated module.
-add_custom_command(TARGET eka2l1_web POST_BUILD
+# The page itself: static files served next to the generated module. Copied on
+# every build, since editing them does not relink the module.
+add_custom_target(eka2l1_web_shell
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/shell" "${CMAKE_BINARY_DIR}/bin")
+add_dependencies(eka2l1_web eka2l1_web_shell)
 
 # The whole emulator runs in a worker (PROXY_TO_PTHREAD) so its blocking loops
 # never stall the page; the canvas is handed to the graphics thread as an
 # OffscreenCanvas. WASMFS keeps file I/O on the calling thread instead of
-# proxying every call to the page. Memory may grow: guest chunks are committed
-# on demand.
+# proxying every call to the page. Memory starts small and grows; the ceiling is
+# kept at 1 GB because some mobile browsers reserve a shared memory's maximum
+# up front and refuse larger ones. A Shadowkey session peaks under 500 MB of
+# heap, about 200 MB of it in use.
 target_link_options(eka2l1_web PRIVATE
         -sPROXY_TO_PTHREAD=1
         -sOFFSCREENCANVAS_SUPPORT=1
@@ -84,8 +88,8 @@ target_link_options(eka2l1_web PRIVATE
         -sMAX_WEBGL_VERSION=2
         -sWASMFS=1
         -sALLOW_MEMORY_GROWTH=1
-        -sINITIAL_MEMORY=268435456
-        -sMAXIMUM_MEMORY=2147483648
+        -sINITIAL_MEMORY=167772160
+        -sMAXIMUM_MEMORY=1073741824
         -sPTHREAD_POOL_SIZE=12
         -sSTACK_SIZE=2097152
         -sDEFAULT_PTHREAD_STACK_SIZE=2097152

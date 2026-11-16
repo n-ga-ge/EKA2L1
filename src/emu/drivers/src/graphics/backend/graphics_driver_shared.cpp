@@ -142,10 +142,13 @@ namespace eka2l1::drivers {
         texture->set_filter_minmag(false, drivers::filter_option::linear);
         texture->set_filter_minmag(true, drivers::filter_option::linear);
 
+#if !EKA2L1_PLATFORM(WEB)
+        // On the web these are RGBA8 already (see translate_bpp_to_format).
         if (bpp == 12) {
             texture->set_channel_swizzle({ channel_swizzle::green, channel_swizzle::blue,
                 channel_swizzle::alpha, channel_swizzle::one });
         }
+#endif
 
         return texture;
     }

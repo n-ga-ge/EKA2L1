@@ -32,7 +32,10 @@ namespace eka2l1::web::persist {
 
         std::mutex lock;
         std::condition_variable wake;
-        bool requested = false;
+        // Requests are numbered so a caller can tell when a pass that started
+        // after its request has finished.
+        std::uint64_t requested = 0;
+        std::uint64_t completed = 0;
         bool mounted = false;
 
         // What the store currently holds, keyed by path relative to the root.
@@ -150,32 +153,41 @@ namespace eka2l1::web::persist {
         return restored > 0;
     }
 
-    void start(const std::string &live_root, std::function<void(std::size_t)> on_saved) {
+    void start(const std::string &live_root, std::function<void(std::uint64_t)> on_pass) {
         if (!mounted) {
             return;
         }
 
-        std::thread([live_root, on_saved = std::move(on_saved)] {
+        std::thread([live_root, on_pass = std::move(on_pass)] {
             for (;;) {
+                std::uint64_t covers = 0;
                 {
                     std::unique_lock<std::mutex> guard(lock);
-                    wake.wait_for(guard, PASS_INTERVAL, [] { return requested; });
-                    requested = false;
+                    wake.wait_for(guard, PASS_INTERVAL, [] { return requested > completed; });
+                    covers = requested;
                 }
 
-                const std::size_t written = pass(live_root);
-                if (written && on_saved) {
-                    on_saved(written);
+                pass(live_root);
+
+                {
+                    std::lock_guard<std::mutex> guard(lock);
+                    completed = covers;
+                }
+
+                if (on_pass) {
+                    on_pass(covers);
                 }
             }
         }).detach();
     }
 
-    void request_save() {
+    std::uint64_t request_save() {
+        std::uint64_t ticket = 0;
         {
             std::lock_guard<std::mutex> guard(lock);
-            requested = true;
+            ticket = ++requested;
         }
         wake.notify_one();
+        return ticket;
     }
 }

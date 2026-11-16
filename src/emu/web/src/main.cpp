@@ -30,11 +30,16 @@
 
 #include <condition_variable>
 #include <cstdlib>
+#include <malloc.h>
 #include <cstring>
 #include <deque>
 #include <filesystem>
 
 using namespace eka2l1;
+
+namespace eka2l1::drivers {
+    extern std::atomic<std::uint64_t> web_graphics_busy_us;
+}
 
 namespace {
     struct pending_request {
@@ -43,6 +48,7 @@ namespace {
     };
 
     web::emulator state;
+    bool persist_enabled = false;
 
     std::mutex queue_mutex;
     std::condition_variable queue_signal;
@@ -126,11 +132,17 @@ namespace {
     }
 
     void notify_page(const char *event) {
+        // The call is asynchronous, so the page gets its own copy to free.
+        char *copy = static_cast<char *>(std::malloc(std::strlen(event) + 1));
+        std::strcpy(copy, event);
+
         MAIN_THREAD_ASYNC_EM_ASM({
+            const name = UTF8ToString($0);
+            _free($0);
             if (Module['eka2l1OnEvent']) {
-                Module['eka2l1OnEvent'](UTF8ToString($0));
+                Module['eka2l1OnEvent'](name);
             }
-        }, event);
+        }, copy);
     }
 
     void setup_control() {
@@ -190,13 +202,25 @@ EMSCRIPTEN_KEEPALIVE void eka2l1_web_touch(int x, int y, int action, int pointer
 }
 
 // Mirror the data tree to persistent storage now instead of at the next
-// periodic pass. The page reports completion as a "saved" event.
-EMSCRIPTEN_KEEPALIVE void eka2l1_web_save() {
-    web::persist::request_save();
+// periodic pass. Returns a ticket; the page gets a "saved:<n>" event with
+// n >= ticket once everything written before this call is stored. Zero means
+// persistence is off.
+EMSCRIPTEN_KEEPALIVE double eka2l1_web_save() {
+    return persist_enabled ? static_cast<double>(web::persist::request_save()) : 0.0;
+}
+
+// Bytes currently allocated from the wasm heap (as opposed to its size).
+EMSCRIPTEN_KEEPALIVE double eka2l1_web_heap_used() {
+    return static_cast<double>(mallinfo().uordblks);
 }
 
 EMSCRIPTEN_KEEPALIVE double eka2l1_web_frames() {
     return static_cast<double>(state.frames.load());
+}
+
+// Microseconds the graphics thread has spent executing draw commands so far.
+EMSCRIPTEN_KEEPALIVE double eka2l1_web_graphics_busy_us() {
+    return static_cast<double>(drivers::web_graphics_busy_us.load());
 }
 
 // Audio: the page reads the ring straight out of wasm memory from its worklet.
@@ -266,8 +290,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    persist_enabled = persist;
     if (persist) {
-        web::persist::start("/eka2l1/data", [](std::size_t) { notify_page("saved"); });
+        web::persist::start("/eka2l1/data", [](std::uint64_t ticket) {
+            notify_page(("saved:" + std::to_string(ticket)).c_str());
+        });
     }
 
     notify_page("ready");

@@ -44,6 +44,14 @@
 
 #if EKA2L1_PLATFORM(WEB)
 #include <emscripten.h>
+
+#include <chrono>
+
+namespace eka2l1::drivers {
+    // Time the graphics thread spent executing commands, for the page's
+    // performance readout. Everything else it does is waiting.
+    std::atomic<std::uint64_t> web_graphics_busy_us{ 0 };
+}
 #endif
 
 #define IMGUI_IMPL_OPENGL_LOADER_GLAD
@@ -2106,11 +2114,16 @@ namespace eka2l1::drivers {
                 break;
             }
 
+            const auto started = std::chrono::steady_clock::now();
+
             for (std::size_t i = 0; i < list->size_; i++) {
                 dispatch(list->base_[i]);
             }
 
             delete[] list->base_;
+
+            web_graphics_busy_us.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
         }
 
         if (should_stop) {

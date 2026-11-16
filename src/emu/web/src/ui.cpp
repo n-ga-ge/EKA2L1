@@ -4,17 +4,26 @@
 #include <drivers/ui/input_dialog.h>
 
 #include <emscripten.h>
+
+#include <cstdlib>
+#include <cstring>
 #include <emscripten/threading.h>
 
 namespace eka2l1::common {
     // A guest asking for the phone's browser opens the link in a new tab. The
     // page may block it as a popup when no user gesture is active.
     bool launch_browser(const std::string &url) {
+        // The call is asynchronous, so the page gets its own copy to free.
+        char *copy = static_cast<char *>(std::malloc(url.size() + 1));
+        std::memcpy(copy, url.c_str(), url.size() + 1);
+
         MAIN_THREAD_ASYNC_EM_ASM({
+            const target = UTF8ToString($0);
+            _free($0);
             if (typeof window !== 'undefined') {
-                window.open(UTF8ToString($0), '_blank', 'noopener');
+                window.open(target, '_blank', 'noopener');
             }
-        }, url.c_str());
+        }, copy);
         return true;
     }
 }

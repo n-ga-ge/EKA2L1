@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -19,9 +20,12 @@ namespace eka2l1::web::persist {
 
     // Starts the background mirror: copies files that changed since the last
     // pass, removes ones that disappeared, on request and every few seconds.
-    // `on_saved` is called after a pass that wrote something.
-    void start(const std::string &live_root, std::function<void(std::size_t)> on_saved);
+    // `on_pass` is called after each pass with the highest request ticket that
+    // pass covers.
+    void start(const std::string &live_root, std::function<void(std::uint64_t)> on_pass);
 
     // Asks for a pass now (after an install, or when the page is being hidden).
-    void request_save();
+    // Returns a ticket; everything written before the call is stored once
+    // `on_pass` reports that ticket or a later one. Zero when storage is off.
+    std::uint64_t request_save();
 }

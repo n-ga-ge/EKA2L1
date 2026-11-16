@@ -31,7 +31,15 @@ namespace eka2l1::arm {
     class exclusive_monitor;
 }
 
+#if defined(__EMSCRIPTEN__)
+// The cache is part of the CPU state and is zero-filled with it, so in a
+// browser its whole size is real memory from the start. A full cache is
+// flushed and refilled, which makes a smaller one only a matter of how often
+// code is retranslated.
+#define TRANS_CACHE_SIZE (32 * 1024 * 1024)
+#else
 #define TRANS_CACHE_SIZE (64 * 1024 * 2000)
+#endif
 
 // Signal levels
 enum { LOW = 0,

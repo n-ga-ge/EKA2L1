@@ -123,19 +123,42 @@ export class Eka2l1 {
     this.module._eka2l1_web_key(scancode, down ? 1 : 0);
   }
 
-  // Writes installed data and saves to persistent storage now. Resolves when
-  // the pass has finished (or after a short wait if nothing needed writing).
+  // Writes installed data and saves to persistent storage now. Resolves once a
+  // storage pass that began after this call has finished, so everything
+  // written before it is safe; resolves at once when persistence is off.
   save() {
     return new Promise((resolve) => {
-      const done = () => { off(); clearTimeout(timer); resolve(); };
-      const off = this.onEvent((name) => { if (name === 'saved') done(); });
-      const timer = setTimeout(done, 15000);
-      this.module._eka2l1_web_save();
+      const ticket = this.module._eka2l1_web_save();
+      if (!ticket) { resolve(false); return; }
+      const done = (stored) => { off(); clearTimeout(timer); resolve(stored); };
+      const off = this.onEvent((name) => {
+        if (name.startsWith('saved:') && Number(name.slice(6)) >= ticket) done(true);
+      });
+      const timer = setTimeout(() => done(false), 60000);
     });
   }
 
   frames() {
     return this.module._eka2l1_web_frames();
+  }
+
+  // Counters for performance readouts: frames presented, time the graphics
+  // thread spent drawing, and the size of the wasm heap.
+  stats() {
+    return {
+      frames: this.module._eka2l1_web_frames(),
+      graphicsBusyMs: this.module._eka2l1_web_graphics_busy_us() / 1000,
+      heapMB: this.module.wasmMemory.buffer.byteLength / 1048576,
+      heapUsedMB: this.module._eka2l1_web_heap_used() / 1048576,
+    };
+  }
+
+  pause() { return this.call('POST', '/v1/emulator/pause'); }
+  resume() { return this.call('POST', '/v1/emulator/resume'); }
+
+  setMuted(muted) {
+    if (!this.audio) return;
+    if (muted) this.audio.suspend(); else this.audio.resume();
   }
 
   // Starts audio output. Must run inside a user gesture (click or key press),

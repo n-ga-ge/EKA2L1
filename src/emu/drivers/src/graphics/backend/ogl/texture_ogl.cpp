@@ -305,6 +305,12 @@ namespace eka2l1::drivers {
     }
 
     void ogl_texture::set_channel_swizzle(channel_swizzles swizz) {
+#if EKA2L1_PLATFORM(WEB)
+        // WebGL2 dropped texture swizzles from GLES3; asking only raises a GL
+        // error. Formats that would need one are converted at upload instead.
+        (void)swizz;
+        return;
+#endif
         GLint swizz_gl[4];
 
         for (int i = 0; i < 4; i++) {
