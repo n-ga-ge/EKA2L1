@@ -42,7 +42,8 @@ canvas { display: block; width: 100%; height: 100%; object-fit: contain; image-r
 .key.primary { background: #2f4f73; }
 .pad-row { display: flex; gap: calc(var(--unit) * .3); }
 .key b { display: block; font-size: 1.05em; line-height: 1.1; }
-.key small { display: block; font-size: 9px; font-weight: 500; line-height: 1.05; color: var(--muted); max-width: var(--unit); overflow: hidden; }
+/* What the key does in the running game: two short lines at most, whatever the catalogue wrote. */
+.key small { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; font-size: 9px; font-weight: 500; line-height: 1.05; color: var(--muted); max-width: var(--unit); overflow: hidden; overflow-wrap: anywhere; }
 .key small:empty { display: none; }
 .dpad { position: relative; width: calc(var(--unit) * 2.5); height: calc(var(--unit) * 2.5); border-radius: 50%; background: var(--key); border: 1px solid var(--line); touch-action: none; }
 .dpad::before, .dpad::after { content: ""; position: absolute; background: var(--line); border-radius: 4px; }
@@ -105,7 +106,10 @@ dialog td.empty { color: var(--muted); text-align: center; }
 .chip.add { color: var(--accent); }
 .chip.listening { background: var(--key-held); border-color: var(--key-held); }
 .menu-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.menu-grid button { padding: 12px 10px; }
+.menu-grid button, .menu-grid a { padding: 12px 10px; }
+/* Links to the rest of the site sit in the grid like the buttons. */
+.menu-grid a { font: inherit; text-align: center; text-decoration: none; border-radius: 6px; border: 1px solid var(--line); background: var(--key); color: var(--accent); }
+.menu-grid a[hidden] { display: none; }
 #controls { width: min(96vw, 760px); }
 #guide { width: min(96vw, 720px); }
 
