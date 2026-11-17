@@ -269,8 +269,8 @@ EMSCRIPTEN_KEEPALIVE void eka2l1_web_touch(int x, int y, int action, int pointer
     state.touch(x, y, action, pointer_id);
 }
 
-// Mirror the data tree to persistent storage now instead of at the next
-// periodic pass. Returns a ticket; the page gets a "saved:<n>" event with
+// Mirror the kept part of the data tree (see persist.h) to persistent storage
+// now instead of at the next periodic pass. Returns a ticket; the page gets a "saved:<n>" event with
 // n >= ticket once everything written before this call is stored. Zero means
 // persistence is off.
 EMSCRIPTEN_KEEPALIVE double eka2l1_web_save() {

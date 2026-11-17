@@ -84,7 +84,7 @@ namespace eka2l1::web {
             const eka2l1::vec2 size = crr_mode.size;
             src.size = size;
 
-            // The page sizes the canvas to a multiple of the guest screen and
+            // The page gives the canvas the shape of the guest screen and
             // lets CSS place it, so the guest picture fills the whole surface
             // while keeping its aspect ratio.
             float width = static_cast<float>(swapchain_size.x);
