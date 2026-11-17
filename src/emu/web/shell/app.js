@@ -27,6 +27,7 @@
 // Firmware and game are fetched with CORS, so their server must allow this
 // origin. loader.js fetches and keeps them; this file installs them.
 
+import { Backdrop } from './backdrop.js';
 import { Eka2l1 } from './eka2l1-client.js';
 import { NGAGE_KEYS, STANDARD_PROFILE, keyName, padName } from './games.js';
 import { Input } from './input.js';
@@ -575,6 +576,29 @@ const RESOLUTIONS = [
   ...[1, 2, 3, 4, 6].map((n) => ({ id: String(n), label: `${n}× native`, hint: '' })),
 ];
 
+// What happens to the space a wide screen leaves beside the upright picture.
+// The style sheet does the work, keyed on the stage's data-fill attribute; the
+// emulator draws the same picture on the same canvas with every choice.
+const FILLS = [
+  { id: 'none', label: 'Original shape', hint: 'The picture keeps the shape of the phone\'s screen, with empty space beside it.' },
+  { id: 'stretch', label: 'Stretch', hint: 'The picture is stretched over the whole area, so everything in it looks wider than the game drew it.' },
+  { id: 'ambient', label: 'Ambient fill', hint: 'The picture keeps its shape, and the space beside it shows a soft, blurred copy of it that follows the game.' },
+];
+
+// Tells the style sheet which fill is chosen. Done as soon as the page loads
+// too, so the stage does not change its width when the game starts.
+function applyFill() {
+  const fill = FILLS.find((item) => item.id === settings.display.fill) || FILLS[0];
+  if (fill.id === 'none') delete $('stage').dataset.fill;
+  else $('stage').dataset.fill = fill.id;
+  return fill;
+}
+applyFill();
+
+// The canvas always has the picture's own shape, because the emulator draws
+// the picture centred in whatever canvas it is given. With the 'stretch' fill
+// the browser widens that canvas; a canvas as wide as the stage would cost the
+// scaling filters several times the work for a picture that is distorted anyway.
 function surfaceSize() {
   const { width, height } = page.screen;
   if (settings.display.resolution !== 'auto') {
@@ -594,6 +618,13 @@ function applyDisplay() {
   const filter = FILTERS.find((item) => item.id === settings.display.filter) || FILTERS[0];
   const module = page.emu.module;
 
+  // The fill comes first: it changes the size of the stage, which the canvas
+  // size is worked out from.
+  const fill = applyFill();
+  // The picture behind the game exists once the ambient fill has been chosen.
+  if (fill.id === 'ambient' && !page.backdrop) page.backdrop = new Backdrop($('backdrop'), canvas, page.emu);
+  if (page.backdrop) page.backdrop.show(fill.id === 'ambient', page.screen);
+
   const [width, height] = surfaceSize();
   module._eka2l1_web_set_surface_size(width, height);
   module.ccall('eka2l1_web_set_upscale_shader', null, ['string'], [filter.shader || '']);
@@ -602,7 +633,7 @@ function applyDisplay() {
   // The browser scales the canvas the rest of the way; match the look.
   canvas.style.imageRendering = filter.id === 'nearest' ? 'pixelated' : 'auto';
   $('stage').style.setProperty('--aspect', `${page.screen.width} / ${page.screen.height}`);
-  page.surface = { width, height, filter: filter.id };
+  page.surface = { width, height, filter: filter.id, fill: fill.id };
 }
 
 function renderDisplay() {
@@ -614,22 +645,30 @@ function renderDisplay() {
   resolutionSelect.innerHTML = RESOLUTIONS.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join('');
   resolutionSelect.value = (RESOLUTIONS.find((item) => item.id === settings.display.resolution) || RESOLUTIONS[0]).id;
 
+  const fillSelect = $('fill-select');
+  fillSelect.innerHTML = FILLS.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join('');
+  fillSelect.value = (FILLS.find((item) => item.id === settings.display.fill) || FILLS[0]).id;
+
   const filter = FILTERS.find((item) => item.id === filterSelect.value);
-  $('filter-hint').textContent = `${filter.hint} FSR 2 is not offered: it needs depth and motion data from a 3D renderer, and a game here only hands over finished 2D frames.`;
+  $('filter-hint').textContent = filter.hint;
   const [width, height] = surfaceSize();
   $('resolution-hint').textContent = `Canvas ${width}×${height} (game screen ${page.screen.width}×${page.screen.height}).`;
+  $('fill-hint').textContent = `${FILLS.find((item) => item.id === fillSelect.value).hint} `
+    + 'Beta. It only changes how the picture is shown: the game draws the same picture and does not show more of its world.';
 }
 
 function wireDisplayDialog() {
   const change = () => {
     settings.display.filter = $('filter-select').value;
     settings.display.resolution = $('resolution-select').value;
+    settings.display.fill = $('fill-select').value;
     saveSettings();
     applyDisplay();
     renderDisplay();
   };
   $('filter-select').addEventListener('change', change);
   $('resolution-select').addEventListener('change', change);
+  $('fill-select').addEventListener('change', change);
 
   let pending = 0;
   const resized = () => {
@@ -736,7 +775,7 @@ function renderGuide() {
     <h3>Display</h3>
     <ul>
       <li><span></span><span><b>Menu → Display</b> chooses how the ${page.screen.width}×${page.screen.height} game picture is scaled: sharp pixels, smooth, FSR 1.0, pixel-art scalers and screen effects.</span></li>
-      <li><span></span><span>FSR 2 cannot be used: it is a temporal upscaler that needs depth and motion data from a 3D renderer, and the emulator only receives the game's finished frames. FSR 1.0 is the spatial version that works on any image.</span></li>
+      <li><span></span><span><b>Fill the screen</b> (beta) uses the space a wide screen leaves beside the upright picture: stretch the picture over it, or keep its shape and fill the space with a soft, blurred copy of it. The game draws the same picture either way; no more of its world is shown.</span></li>
       <li><span></span><span>None of these change the game's speed, which depends on your device's processor.</span></li>
     </ul>`);
 }
