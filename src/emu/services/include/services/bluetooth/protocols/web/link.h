@@ -37,13 +37,26 @@ namespace eka2l1::epoc::bt::web {
      * never on the page's main thread, and never while the link holds a lock.
      */
     /**
-     * @brief What can be shown of a name that came from outside.
+     * @brief What can be kept of a name that came from outside.
      *
-     * Keeps the well-formed UTF-8 characters that are not control characters,
-     * up to `max_size` bytes. A name comes from a page or from another player,
-     * and the converters it is later given to throw on malformed input.
+     * Keeps the well-formed UTF-8 characters, up to `max_size` bytes. A name
+     * comes from a page or from another player, and nothing downstream may be
+     * handed malformed text.
+     *
+     * A name a person chose (the page's) also loses its control characters.
+     * A device name that travels between two guests keeps them
+     * (`keep_controls`): games put things in the phone's name that the other
+     * side looks for, and not all of it is printable. FIFA 2005 hosts under
+     * its UID as four characters in front of the name, three of them control
+     * characters.
      */
-    std::string clean_name(const char *data, const std::size_t size, const std::size_t max_size);
+    std::string clean_name(const char *data, const std::size_t size, const std::size_t max_size,
+        const bool keep_controls = false);
+
+    /// A guest's device name as UTF-8 for a frame, and back. Unlike the common
+    /// converters these never throw: an unpaired surrogate is left out.
+    std::string name_to_utf8(const std::u16string &name);
+    std::u16string name_from_utf8(const std::string &name);
 
     class link_handler {
     public:

@@ -10,7 +10,7 @@
 #include <thread>
 
 namespace eka2l1::epoc::bt::web {
-    std::string clean_name(const char *data, const std::size_t size, const std::size_t max_size) {
+    std::string clean_name(const char *data, const std::size_t size, const std::size_t max_size, const bool keep_controls) {
         const unsigned char *in = reinterpret_cast<const unsigned char *>(data);
         std::string out;
 
@@ -55,12 +55,77 @@ namespace eka2l1::epoc::bt::web {
             }
 
             const bool control = (code < 0x20) || ((code >= 0x7F) && (code < 0xA0));
-            if (!control) {
+            if (keep_controls || !control) {
                 if (out.size() + length > max_size) {
                     break;
                 }
 
                 out.append(data + i, length);
+            }
+
+            i += length;
+        }
+
+        return out;
+    }
+
+    std::string name_to_utf8(const std::u16string &name) {
+        std::string out;
+
+        for (std::size_t i = 0; i < name.size(); i++) {
+            std::uint32_t code = name[i];
+
+            if ((code >= 0xD800) && (code <= 0xDBFF)) {
+                if ((i + 1 >= name.size()) || (name[i + 1] < 0xDC00) || (name[i + 1] > 0xDFFF)) {
+                    continue;
+                }
+
+                code = 0x10000 + ((code - 0xD800) << 10) + (name[i + 1] - 0xDC00);
+                i++;
+            } else if ((code >= 0xDC00) && (code <= 0xDFFF)) {
+                continue;
+            }
+
+            if (code < 0x80) {
+                out.push_back(static_cast<char>(code));
+            } else if (code < 0x800) {
+                out.push_back(static_cast<char>(0xC0 | (code >> 6)));
+                out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+            } else if (code < 0x10000) {
+                out.push_back(static_cast<char>(0xE0 | (code >> 12)));
+                out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+            } else {
+                out.push_back(static_cast<char>(0xF0 | (code >> 18)));
+                out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+            }
+        }
+
+        return out;
+    }
+
+    std::u16string name_from_utf8(const std::string &name) {
+        // Whatever is malformed goes first, so the loop below can trust the lengths.
+        const std::string good = clean_name(name.data(), name.size(), name.size(), true);
+        std::u16string out;
+
+        for (std::size_t i = 0; i < good.size();) {
+            const unsigned char lead = static_cast<unsigned char>(good[i]);
+            const std::size_t length = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : (lead >= 0xC0) ? 2 : 1;
+
+            std::uint32_t code = (length == 1) ? lead : (lead & (0xFF >> (length + 1)));
+            for (std::size_t k = 1; k < length; k++) {
+                code = (code << 6) | (static_cast<unsigned char>(good[i + k]) & 0x3F);
+            }
+
+            if (code >= 0x10000) {
+                code -= 0x10000;
+                out.push_back(static_cast<char16_t>(0xD800 + (code >> 10)));
+                out.push_back(static_cast<char16_t>(0xDC00 + (code & 0x3FF)));
+            } else {
+                out.push_back(static_cast<char16_t>(code));
             }
 
             i += length;

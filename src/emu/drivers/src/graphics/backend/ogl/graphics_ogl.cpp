@@ -44,6 +44,7 @@
 
 #if EKA2L1_PLATFORM(WEB)
 #include <emscripten.h>
+#include <emscripten/html5.h>
 
 #include <chrono>
 
@@ -51,6 +52,18 @@ namespace eka2l1::drivers {
     // Time the graphics thread spent executing commands, for the page's
     // performance readout. Everything else it does is waiting.
     std::atomic<std::uint64_t> web_graphics_busy_us{ 0 };
+
+    // For tests, set by the page (eka2l1_web_debug_animation_frames): 1 acts
+    // as a browser that gives this page no animation frames, 2 also switches
+    // off the timer that then stands in for them.
+    std::atomic<int> web_debug_animation_frames{ 0 };
+
+    namespace {
+        // The graphics thread's own; nothing else reads them.
+        std::chrono::steady_clock::time_point web_last_animation_frame;
+        std::chrono::steady_clock::time_point web_last_frame_request;
+        long web_frame_timer = 0;
+    }
 }
 #endif
 
@@ -2127,14 +2140,62 @@ namespace eka2l1::drivers {
         }
 
         if (should_stop) {
+            emscripten_clear_interval(web_frame_timer);
             emscripten_cancel_main_loop();
         }
     }
 
     void ogl_graphics_driver::run() {
-        emscripten_set_main_loop_arg([](void *self) {
+        // A browser gives animation frames only to a page it draws. A tab in
+        // the background, a minimised window and, on some systems, a window
+        // behind another get none, and the guest waits for each frame it
+        // presents: its game stands still while its sound goes on. For a
+        // player alone that is what a page they do not look at should do, and
+        // the page pauses the emulator anyway. In a multiplayer room the other
+        // players' games wait for this one, so it has to go on unseen.
+        //
+        // So a timer of this thread stands in. When no animation frame has
+        // come for a while it does a frame's work itself, at a pace near the
+        // one games here draw at. A worker's timers keep their pace in a page
+        // that is not shown; the page's own do not. It also asks for animation
+        // frames anew now and then, in case the browser let the request go.
+        static constexpr double TIMER_INTERVAL_MS = 33.0;
+        static constexpr auto FRAMES_MISSING_AFTER = std::chrono::milliseconds(100);
+        static constexpr auto ASK_AGAIN_EVERY = std::chrono::seconds(1);
+
+        static void (*const animation_frame)(void *) = [](void *self) {
+            if (web_debug_animation_frames.load(std::memory_order_relaxed) != 0) {
+                return;
+            }
+
+            web_last_animation_frame = std::chrono::steady_clock::now();
             static_cast<ogl_graphics_driver *>(self)->run_until_present();
-        }, this, 0, true);
+        };
+
+        web_last_animation_frame = std::chrono::steady_clock::now();
+        web_last_frame_request = web_last_animation_frame;
+
+        web_frame_timer = emscripten_set_interval([](void *self) {
+            if (web_debug_animation_frames.load(std::memory_order_relaxed) == 2) {
+                return;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now - web_last_animation_frame < FRAMES_MISSING_AFTER) {
+                return;
+            }
+
+            if (now - web_last_frame_request >= ASK_AGAIN_EVERY) {
+                web_last_frame_request = now;
+
+                emscripten_cancel_main_loop();
+                emscripten_set_main_loop_arg(animation_frame, self, 0, false);
+            }
+
+            static_cast<ogl_graphics_driver *>(self)->run_until_present();
+        }, TIMER_INTERVAL_MS, this);
+
+        emscripten_set_main_loop_arg(animation_frame, this, 0, true);
     }
 #else
     void ogl_graphics_driver::run() {

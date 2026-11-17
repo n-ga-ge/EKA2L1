@@ -252,8 +252,10 @@ namespace eka2l1::epoc::bt::web {
         bool dead_ = false;
 
         device_address address_{};
-        std::u16string name_; ///< The device's Bluetooth name: what the guest reads and the others are told.
-        std::string link_name_taken_; ///< The room name that last became the device's name.
+        std::u16string device_name_; ///< The name the device has by itself.
+        std::u16string guest_name_; ///< The name the guest gave it, when `guest_named_`.
+        bool guest_named_ = false;
+        std::vector<std::u16string> given_names_; ///< Every name the guest may have read: the device's, and the player's in each room.
         std::uint32_t epoch_ = 0;
         std::uint32_t conn_counter_ = 0;
 
@@ -274,8 +276,9 @@ namespace eka2l1::epoc::bt::web {
         void forget(const channel &chan);
         void unqueue(const std::shared_ptr<channel> &chan);
 
+        std::u16string room_name() const;
         std::string announced_name() const;
-        void take_link_name();
+        void remember_given_name(const std::u16string &name);
         void send_announce(const int dst);
         void send_control(const int dst, const std::uint8_t type, const std::uint8_t flags, const std::uint32_t conn,
             const std::uint8_t *body, const std::size_t body_size);
@@ -346,12 +349,23 @@ namespace eka2l1::epoc::bt::web {
 
         /// The device's Bluetooth name. A phone has one: the guest reads it,
         /// the guest may change it, and a search by another phone shows it.
-        /// The name the player has in the room becomes it when the player
-        /// enters the room; a name the guest sets after that replaces it,
-        /// because games put things in it that the other side looks for
-        /// (Call of Duty hosts under its UID followed by the old name, and
-        /// joins only a device named so). Returns whether the name changed.
-        bool set_name(const std::u16string &name);
+        ///
+        /// Until the guest sets a name, it is the name the player has in the
+        /// room, or the device's own outside one. A name the guest sets stays,
+        /// whatever happens to the link after, because games put things in it
+        /// that the other side looks for: Call of Duty hosts under its UID
+        /// followed by the name it read, Ashen does the same once when it
+        /// starts, and both join only a device named so.
+        ///
+        /// What the others are told is that name with one change: where it
+        /// ends with a name the guest was given (the device's, or the
+        /// player's in a room), that end is the player's name in the room
+        /// now. A game that read "EKA2L1" before its player entered a room as
+        /// Ann and hosts as "101fd3f5EKA2L1" is announced as "101fd3f5Ann",
+        /// so the other player's list says Ann. The guest itself reads back
+        /// exactly what it set.
+        void set_device_name(const std::u16string &name);
+        bool set_name(const std::u16string &name); ///< By the guest. Returns whether it changed.
         std::u16string local_name() const;
 
         std::vector<peer_info> announced_peers() const;
