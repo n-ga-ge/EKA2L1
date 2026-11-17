@@ -52,7 +52,7 @@ namespace eka2l1::enhance {
 
     static const char *format_name(const texture_format format) {
         static const char *names[] = { "none", "p8", "rgb444", "argb4444", "rgb565", "rgb555", "argb1555",
-            "rgb888", "argb8888", "xrgb8888", "a8", "l8" };
+            "rgb888", "argb8888", "xrgb8888", "a8", "l8", "p4", "bgr555k" };
         return names[format];
     }
 
@@ -267,7 +267,7 @@ namespace eka2l1::enhance {
     }
 
     json engine::frame_json(const frame &f) {
-        static const char *blends[] = { "none", "alpha", "add", "multiply", "key" };
+        static const char *blends[] = { "none", "alpha", "add", "multiply", "key", "subtract" };
         static const char *depths[] = { "none", "less", "lequal", "greater", "gequal" };
 
         json::array vertices;
