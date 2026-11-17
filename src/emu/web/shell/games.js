@@ -111,6 +111,10 @@ const INPUT_SHAPE = {
 };
 const MAX_INPUTS = 8; // per N-Gage key
 const MAX_NOTES = 24;
+// Longest text taken from an entry, in characters; anything longer is cut.
+// The site's catalogue is checked against the same numbers before it is
+// published, so in practice nothing is.
+const LIMITS = { title: 80, action: 120, source: 500, note: 600 };
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -165,7 +169,7 @@ export function profileFromEntry(entry) {
   const actions = {};
   if (isRecord(controls.actions)) {
     for (const key of KEY_IDS) {
-      const action = Object.hasOwn(controls.actions, key) ? text(controls.actions[key], 80) : '';
+      const action = Object.hasOwn(controls.actions, key) ? text(controls.actions[key], LIMITS.action) : '';
       if (action) actions[key] = action;
     }
   }
@@ -174,12 +178,12 @@ export function profileFromEntry(entry) {
 
   return {
     id,
-    name: text(entry.title, 80) || id,
+    name: text(entry.title, LIMITS.title) || id,
     actions,
     keyboard: layout(controls.keyboard, 'keyboard'),
     gamepad: layout(controls.gamepad, 'gamepad'),
-    notes: [...textList(controls.notes, 400), ...textList(entry.notes, 400)],
-    source: text(controls.source, 300),
+    notes: [...textList(controls.notes, LIMITS.note), ...textList(entry.notes, LIMITS.note)],
+    source: text(controls.source, LIMITS.source),
   };
 }
 
@@ -203,9 +207,9 @@ export function gameFacts(entry) {
   const year = Number.isInteger(entry.year) && entry.year > 1990 && entry.year < 2100 ? String(entry.year) : '';
 
   return {
-    title: text(entry.title, 80),
+    title: text(entry.title, LIMITS.title),
     about: [text(entry.publisher, 60), year, text(entry.genre, 60)].filter(Boolean).join(' · '),
-    status: words ? { label: words.label, tone: words.tone, note: text(entry.statusNote, 400) || words.fallback } : null,
+    status: words ? { label: words.label, tone: words.tone, note: text(entry.statusNote, LIMITS.note) || words.fallback } : null,
   };
 }
 

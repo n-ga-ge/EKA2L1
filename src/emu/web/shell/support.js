@@ -124,7 +124,7 @@ export async function detectSupport() {
 
   const optional = [
     check('Audio (AudioWorklet)', typeof AudioWorkletNode !== 'undefined', 'without it the game is silent'),
-    check('Persistent storage (OPFS)', Boolean(navigator.storage && navigator.storage.getDirectory), 'without it nothing is kept between visits'),
+    check('Persistent storage (OPFS)', Boolean(navigator.storage && navigator.storage.getDirectory), 'without it saves are not kept between visits'),
     check('Gamepad API', typeof navigator.getGamepads === 'function'),
     check('Touch input', navigator.maxTouchPoints > 0, `${navigator.maxTouchPoints || 0} touch points`),
     check('Fullscreen', Boolean(document.fullscreenEnabled || document.webkitFullscreenEnabled)),

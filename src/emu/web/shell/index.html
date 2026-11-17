@@ -41,13 +41,13 @@
         <fieldset>
           <legend>From URLs</legend>
           <label id="fw-url-row">Firmware (ROM dump) <input id="fw-url" type="url" inputmode="url" placeholder="https://…/NGAGE.ROM" autocomplete="off"></label>
-          <label>Game card dump (.zip) <input id="game-url" type="url" inputmode="url" placeholder="https://…/game.zip" autocomplete="off"></label>
+          <label>Game card dump (.zip, .7z or .rar) <input id="game-url" type="url" inputmode="url" placeholder="https://…/game.zip" autocomplete="off"></label>
           <button id="btn-load-url" type="button" class="primary">Load from URL</button>
         </fieldset>
         <fieldset>
           <legend>From this device</legend>
           <label id="fw-row">Firmware (ROM dump) <input id="fw-file" type="file"></label>
-          <label>Game card dump (.zip) <input id="game-file" type="file" accept=".zip,.7z,.rar"></label>
+          <label>Game card dump (.zip, .7z or .rar) <input id="game-file" type="file" accept=".zip,.7z,.rar"></label>
           <button id="btn-load-files" type="submit">Load files</button>
         </fieldset>
       </form>
