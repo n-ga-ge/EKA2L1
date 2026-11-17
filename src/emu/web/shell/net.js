@@ -53,6 +53,10 @@ import { siteConfig } from './catalog.js';
 //             until the next hello.
 //         closed({ code, message })
 //             Out of the room for good. `code` is one of ERROR_CODES.
+//   ping(), health()
+//       Optional, for the diagnostics: ping() measures one round trip now
+//       (false when it cannot), and health() returns what the transport knows
+//       about its connection as plain data: see RelayTransport.
 //
 // A second transport (WebRTC is the one planned) has to provide exactly this:
 // room membership with stable small ids, ordered frames per sender, and the
@@ -71,7 +75,7 @@ const GAME_PATTERN = /^[a-z0-9-]{1,64}$/;
 export const ERROR_CODES = ['bad-request', 'no-room', 'room-exists', 'room-full', 'too-fast', 'unreachable', 'lost', 'too-big'];
 const RELAY_CLOSE_CODES = { 4400: 'bad-request', 4404: 'no-room', 4409: 'room-exists', 4413: 'room-full', 4429: 'too-fast', 1009: 'too-big' };
 
-const PING_MS = 30000;
+export const PING_MS = 30000;
 // A relay that has said nothing for this long is taken for dead.
 const SILENCE_MS = 75000;
 // Waits before each new attempt after a drop; after the last one it is over.
@@ -86,6 +90,10 @@ const GONE_TRIES = 3;
 // The relay closes right after it refuses; an error older than this has
 // nothing to do with a close that comes now.
 const REFUSAL_MS = 10000;
+// How many round trips to the relay are remembered, and how many pings may
+// wait for their answer before the oldest is given up.
+const TRIPS_KEPT = 8;
+const PINGS_OPEN = 4;
 
 // A room code as the relay wants it, or '' when `text` is not one. Takes what
 // people paste: lower case, spaces, a dash in the middle.
@@ -208,6 +216,10 @@ export class RelayTransport {
     this.pingTimer = 0;
     this.retryTimer = 0;
     this.refusal = null; // the relay's { code, message, at } before it closed
+    this.pings = []; // when each ping that has no answer yet was sent, oldest first
+    this.givenUp = 0; // pings no longer waited for, whose pongs may still come
+    this.trips = []; // the last round trips to the relay: { ms, at }
+    this.drops = 0; // how often a working connection to this room dropped
   }
 
   connect(wanted) {
@@ -218,6 +230,8 @@ export class RelayTransport {
     this.recreate = false;
     this.attempt = 0;
     this.gone = 0;
+    this.trips = [];
+    this.drops = 0;
     this.open(Boolean(wanted.create));
   }
 
@@ -242,7 +256,47 @@ export class RelayTransport {
     this.say({ t: 'public', value: Boolean(value) });
   }
 
+  // Measures one round trip to the relay now, for the diagnostics, which ask
+  // while their dialog is open. Only when no ping is on its way: the regular
+  // ones measure too, and the relay must not be asked more than that. Returns
+  // whether a ping was sent.
+  ping() {
+    if (!this.greeted || this.pings.length || !this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
+    this.sendPing();
+    return true;
+  }
+
+  // What the diagnostics show of the connection. Nothing in it names the
+  // room or a player. Times are in milliseconds.
+  health() {
+    const now = performance.now();
+    return {
+      connected: this.greeted,
+      attempt: this.attempt, // of getting back in; 0 when the connection never dropped or has settled
+      drops: this.drops,
+      openMs: this.greeted ? now - this.openedAt : null,
+      heardMs: this.socket ? now - this.heardAt : null, // since the relay last sent anything
+      waitingMs: this.pings.length ? now - this.pings[0] : 0, // how long the oldest unanswered ping has waited
+      trips: this.trips.map((trip) => ({ ms: trip.ms, agoMs: now - trip.at })), // oldest first
+      // The code only when it is a known one: the relay's own text stays here.
+      refusal: !this.refusal ? null : ERROR_CODES.includes(this.refusal.code) ? this.refusal.code : 'other',
+    };
+  }
+
   // --- inside ---
+
+  // The text of a ping is fixed: the deployed relay answers exactly this one
+  // without waking the room. So a pong cannot say which ping it answers, and
+  // the pings are matched with the pongs by their order.
+  sendPing() {
+    this.pings.push(performance.now());
+    if (this.pings.length > PINGS_OPEN) {
+      // Its pong may still come, and must then not be taken for the next one's.
+      this.pings.shift();
+      this.givenUp++;
+    }
+    this.say({ t: 'ping' });
+  }
 
   say(message) {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
@@ -259,6 +313,8 @@ export class RelayTransport {
     const socket = this.socket;
     this.socket = null;
     this.greeted = false;
+    this.pings = [];
+    this.givenUp = 0;
     if (!socket) return;
     socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
     try { socket.close(1000); } catch { /* already closed */ }
@@ -307,7 +363,7 @@ export class RelayTransport {
         this.onClose(0, create);
         return;
       }
-      if (this.greeted) this.say({ t: 'ping' });
+      if (this.greeted) this.sendPing();
     }, PING_MS);
   }
 
@@ -363,7 +419,21 @@ export class RelayTransport {
       case 'error':
         this.refusal = { code: typeof message.code === 'string' ? message.code : '', message: shortText(message.message, 200), at: performance.now() };
         break;
-      default: // 'pong' and anything newer
+      case 'pong': {
+        // The answer to the oldest ping still open: the time between the two
+        // is one round trip, the page's own delays included.
+        if (this.givenUp) {
+          this.givenUp--;
+          break;
+        }
+        const sent = this.pings.shift();
+        if (sent === undefined) break;
+        const now = performance.now();
+        this.trips.push({ ms: now - sent, at: now });
+        if (this.trips.length > TRIPS_KEPT) this.trips.shift();
+        break;
+      }
+      default: // anything newer
     }
   }
 
@@ -418,6 +488,7 @@ export class RelayTransport {
     // A little apart, so that a room does not come back all at once.
     const delay = Math.round(RETRY_MS[this.attempt] * (0.75 + Math.random() * 0.5));
     this.attempt++;
+    if (wasGreeted) this.drops++;
     this.emit('lost', { attempt: this.attempt, delay });
     clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => { if (this.wanted && !this.socket) this.open(this.recreate); }, delay);
@@ -470,6 +541,7 @@ export class Session {
 
   reset() {
     this.state = 'idle';
+    this.since = performance.now(); // when `state` became what it is
     this.room = '';
     this.game = '';
     this.name = '';
@@ -512,6 +584,7 @@ export class Session {
       return;
     }
     this.state = 'connecting';
+    this.since = performance.now();
     this.room = wanted.room;
     this.name = wanted.name;
     this.game = wanted.game;
@@ -597,6 +670,34 @@ export class Session {
     if (this.state === 'open') this.linkUp();
   }
 
+  // For the diagnostics: measures one round trip to the room now, where the
+  // transport can. Returns whether it was asked.
+  ping() {
+    const transport = this.transport;
+    return Boolean(transport && this.state === 'open' && typeof transport.ping === 'function' && transport.ping());
+  }
+
+  // What the diagnostics show of this player's place in a room. It leaves out
+  // the room's code and every name on purpose: this goes into a report that
+  // the player sends to somebody else. `error` is the code of the last room
+  // that ended badly, `sinceMs` how long the state has been what it is, and
+  // `transport` is what the transport says about its connection (null when
+  // there is none or it does not say).
+  health() {
+    const transport = this.transport;
+    return {
+      state: this.state,
+      sinceMs: performance.now() - this.since,
+      players: this.players,
+      created: this.created,
+      public: this.public,
+      linked: this.linked,
+      held: this.held,
+      error: this.error ? this.error.code : null,
+      transport: transport && typeof transport.health === 'function' ? transport.health() : null,
+    };
+  }
+
   // --- inside ---
 
   fail(code, message) {
@@ -617,6 +718,7 @@ export class Session {
     // A hello while linked would be a second link under another id.
     this.linkDown();
     this.state = 'open';
+    this.since = performance.now();
     this.id = info.id;
     this.room = info.room;
     this.game = info.game || this.game;
@@ -643,6 +745,8 @@ export class Session {
 
   onLost() {
     this.linkDown();
+    // Comes again with every attempt that fails: the state is as old as the first.
+    if (this.state !== 'retrying') this.since = performance.now();
     this.state = 'retrying';
     this.id = 0;
     this.peers = new Map();
