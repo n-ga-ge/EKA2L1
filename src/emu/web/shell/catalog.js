@@ -11,6 +11,11 @@
 //   "assets"   base URL the game files are served from; a game's card is
 //              <assets>games/<slug>.zip unless its entry has an absolute "zip".
 //   "fw"       URL of the firmware.
+// Other keys of config.json are read elsewhere: "home" and "docs" (the menu's
+// links back to the site, profiles.js), "cacheMB" (the size bound of the
+// download cache, loader.js, which also reads <catalog>assets.json) and
+// "title" and "game" (a one-click "Play <title>" for a site without a
+// catalogue, app.js).
 // Everything here resolves to null when the site has no catalogue or a file is
 // missing, so the page works the same on a bare build.
 

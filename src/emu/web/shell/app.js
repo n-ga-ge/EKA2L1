@@ -885,9 +885,9 @@ function wireControls() {
   $('m-docs').addEventListener('click', () => $('menu').close());
   // Leaving for the list of games ends this one: stop it and store what it
   // saved first, because a page that is going away may not get to finish a
-  // storage pass. A pass takes a fraction of a second, except the first one of
-  // a first visit, which copies the firmware and the card; nobody leaving is
-  // made to wait for that one.
+  // storage pass. A pass only copies the phone's memory and takes a fraction
+  // of a second; the wait is bounded all the same, so that slow storage never
+  // keeps anyone from leaving.
   $('m-home').addEventListener('click', (event) => {
     if (!page.emu || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
