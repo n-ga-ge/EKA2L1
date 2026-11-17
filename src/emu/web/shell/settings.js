@@ -14,6 +14,9 @@ const DEFAULTS = {
     // 'auto' matches the size the picture is shown at; a number is that many
     // times the guest's own resolution.
     resolution: 'auto',
+    // What fills the space beside the picture on a wide screen: 'none',
+    // 'stretch' or 'ambient' (beta).
+    fill: 'none',
   },
   // 'auto' picks the running game's profile when there is one.
   profile: 'auto',

@@ -30,6 +30,7 @@
     </div>
 
     <div id="stage">
+      <canvas id="backdrop" width="44" height="52" aria-hidden="true"></canvas>
       <canvas id="canvas" width="528" height="624" tabindex="0"></canvas>
       <div id="overlay" hidden></div>
 
@@ -111,6 +112,10 @@
       <select id="resolution-select"></select>
     </label>
     <p class="hint" id="resolution-hint"></p>
+    <label class="row"><span>Fill the screen <small class="beta">beta</small></span>
+      <select id="fill-select"></select>
+    </label>
+    <p class="hint" id="fill-hint"></p>
     <form method="dialog"><button type="submit">Close</button></form>
   </dialog>
 
