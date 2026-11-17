@@ -46,12 +46,13 @@
 #endif
 
 #define POSIX_REQUEST_FINISH_WITH_ERR(ctx, err) \
-    *errnoptr = err;                            \
+    *errnoptr = guest_errno(err);               \
     ctx.complete(epoc::error_none);             \
     return
 
-#define POSIX_REQUEST_FINISH(ctx)   \
-    ctx.complete(epoc::error_none); \
+#define POSIX_REQUEST_FINISH(ctx)       \
+    *errnoptr = guest_errno(*errnoptr); \
+    ctx.complete(epoc::error_none);     \
     return
 
 #define POSIX_REQUEST_INIT(ctx)                                                             \
@@ -86,6 +87,38 @@ namespace eka2l1 {
         constexpr std::int32_t POSIX_O_TRUNC = 0x0400;
         constexpr std::int32_t POSIX_O_EXCL = 0x0800;
         constexpr std::int32_t POSIX_O_TMPFILE = 0x10000000;
+
+        // S60 2nd Edition's libc/sys/errno.h numbers. Like the O_* constants, the
+        // host's E* values are an ABI detail of the build machine: Emscripten
+        // numbers them as WASI does, where ENOENT is 44 and EEXIST is 20, which
+        // the guest reads as ENOTDIR.
+        std::int32_t guest_errno(const int host_errno) {
+            switch (host_errno) {
+            case 0:
+                return 0;
+            case ENOENT:
+                return 2;
+            case EBADF:
+                return 9;
+            case EACCES:
+                return 13;
+            case EFAULT:
+                return 14;
+            case EEXIST:
+                return 17;
+            case ENOTDIR:
+                return 20;
+            case EISDIR:
+                return 21;
+            case EINVAL:
+                return 22;
+            case EMFILE:
+                return 24;
+            default:
+                // EIO, and anything this server does not report by name.
+                return 5;
+            }
+        }
 
         bool valid_guest_range(kernel::process *process, const address start, const std::size_t size) {
             if (size == 0) {
