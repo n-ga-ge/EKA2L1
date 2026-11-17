@@ -70,8 +70,8 @@ namespace eka2l1::enhance {
         std::uint32_t width = 0, height = 0;
         std::uint32_t pitch = 0;
         std::uint32_t palette = 0;
-        // Bytes from one palette entry to the next; 0 is the size of an
-        // entry in the palette's format (the entries lie one after another).
+        // Bytes from one palette entry to the next (a paletted texture
+        // only); 0 is the size of an entry in the palette's format.
         std::uint32_t palette_stride = 0;
         texture_format format = FORMAT_NONE;
         texture_format palette_format = FORMAT_NONE;
