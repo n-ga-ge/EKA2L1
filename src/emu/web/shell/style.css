@@ -23,6 +23,10 @@ body {
 #actions button { font: inherit; font-size: 13px; padding: 6px 10px; min-height: 32px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
 #actions button:disabled { opacity: .4; cursor: default; }
 #actions button[aria-pressed="true"] { background: var(--key-held); border-color: var(--key-held); }
+/* The multiplayer room this player is in: its code and how many are in it. */
+#actions #net-chip { border-color: var(--accent); color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#actions #net-chip.warn { border-color: #f2c66d; color: #f2c66d; }
+#net-chip .narrow { display: none; }
 
 #console { flex: 1; min-height: 0; width: 100%; display: flex; align-items: center; justify-content: center; gap: 12px; }
 #stage { position: relative; flex: 1 1 auto; align-self: stretch; min-width: 0; min-height: 0; max-width: 900px; }
@@ -134,6 +138,33 @@ dialog td.empty { color: var(--muted); text-align: center; }
 .menu-grid a { font: inherit; text-align: center; text-decoration: none; border-radius: 6px; border: 1px solid var(--line); background: var(--key); color: var(--accent); }
 .menu-grid a[hidden] { display: none; }
 #controls { width: min(96vw, 760px); }
+/* Multiplayer dialog */
+dialog input[type="text"] { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; min-width: 0; }
+dialog .row input[type="text"] { flex: 0 1 62%; }
+dialog button.primary { border: 0; background: var(--accent); color: #06121f; font-weight: 600; }
+dialog .line { display: flex; gap: 8px; margin: 8px 0; }
+dialog .line[hidden] { display: none; }
+dialog .line input { flex: 1 1 0; }
+dialog .line button { flex: none; }
+dialog .check { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; cursor: pointer; }
+dialog .check[hidden] { display: none; }
+dialog .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+dialog .notice { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow-wrap: anywhere; }
+dialog .notice:empty { display: none; }
+dialog .notice.bad { border-color: #ff9c8a; color: #ff9c8a; }
+dialog .notice.warn { border-color: #f2c66d; color: #f2c66d; }
+dialog .room-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; color: var(--muted); }
+#mp-room-code { color: var(--text); font: 600 26px/1.1 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .1em; margin-left: 4px; }
+#mp-link { font-size: 13px; }
+#mp-code { text-transform: uppercase; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .08em; }
+#mp-code::placeholder { text-transform: none; font-family: system-ui, sans-serif; letter-spacing: 0; }
+dialog .rooms li { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 6px 6px 10px; }
+dialog .rooms li > span { min-width: 0; overflow-wrap: anywhere; }
+dialog .rooms li small { color: var(--muted); }
+dialog .rooms button { flex: none; padding: 6px 12px; }
+dialog .rooms:empty { display: none; }
+#mp-refresh { margin-top: 8px; }
+#mp-players li > span { overflow-wrap: anywhere; }
 #guide { width: min(96vw, 720px); }
 
 /* Touch controls only where there is a touch screen (or ?touch=1). */
@@ -154,6 +185,8 @@ body.touch .desktop-only { display: none; }
   #bar { gap: 6px; }
   #actions { gap: 4px; }
   #actions button { font-size: 12px; padding: 5px 7px; }
+  #net-chip .wide { display: none; }
+  #net-chip .narrow { display: inline; }
 }
 
 /* Short landscape screens (phones on their side): tighten everything. */
