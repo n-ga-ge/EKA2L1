@@ -126,6 +126,8 @@ namespace eka2l1::epoc::bt::web {
         peers_.clear();
 
         // The room may be older than this guest: a restart leaves the link up.
+        take_link_name();
+
         if (link_.up) {
             for (const int id : link_.peers) {
                 add_peer(id);
@@ -188,29 +190,39 @@ namespace eka2l1::epoc::bt::web {
         }
     }
 
-    void stack::set_fallback_name(const std::u16string &name) {
-        if (fallback_name_ == name) {
-            return;
+    bool stack::set_name(const std::u16string &name) {
+        if (name_ == name) {
+            return false;
         }
 
-        fallback_name_ = name;
+        name_ = name;
 
-        if (link_up() && link_.name.empty()) {
+        if (link_up()) {
             send_announce(0);
         }
+
+        return true;
     }
 
     std::u16string stack::local_name() const {
-        if (link_.up && !link_.name.empty()) {
-            return common::utf8_to_ucs2(link_.name);
-        }
-
-        return fallback_name_;
+        return name_;
     }
 
     std::string stack::announced_name() const {
-        const std::string name = (link_.up && !link_.name.empty()) ? link_.name : common::ucs2_to_utf8(fallback_name_);
+        const std::string name = common::ucs2_to_utf8(name_);
         return clean_name(name.data(), name.size(), link::MAX_NAME_SIZE);
+    }
+
+    void stack::take_link_name() {
+        // Once per name, not once per link: the link comes up again after
+        // every lost connection to the room, and a game that is hosting under
+        // a name of its own must keep it then.
+        if (!link_.up || link_.name.empty() || (link_.name == link_name_taken_)) {
+            return;
+        }
+
+        link_name_taken_ = link_.name;
+        name_ = common::utf8_to_ucs2(link_.name);
     }
 
     peer_info *stack::find_peer(const int id) {
@@ -710,6 +722,8 @@ namespace eka2l1::epoc::bt::web {
             }
         }
 
+        take_link_name();
+
         if (link_.up) {
             send_announce(0);
         }
@@ -1058,6 +1072,7 @@ namespace eka2l1::epoc::bt::web {
 
         out.attached = attached_ && !dead_;
         out.address = address_to_string(address_);
+        out.name = announced_name();
         out.totals = totals_;
 
         for (const auto &peer : peers_) {
