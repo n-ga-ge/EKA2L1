@@ -153,6 +153,10 @@ dialog .notice { background: var(--bg); border: 1px solid var(--line); border-ra
 dialog .notice:empty { display: none; }
 dialog .notice.bad { border-color: #ff9c8a; color: #ff9c8a; }
 dialog .notice.warn { border-color: #f2c66d; color: #f2c66d; }
+dialog .finding { margin: 6px 0; }
+dialog .finding p { margin: 4px 0 0; color: var(--text); }
+dialog .finding .advice { color: var(--muted); }
+dialog .diag-body ul + ul { margin-top: 8px; }
 dialog .room-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; color: var(--muted); }
 #mp-room-code { color: var(--text); font: 600 26px/1.1 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .1em; margin-left: 4px; }
 #mp-link { font-size: 13px; }

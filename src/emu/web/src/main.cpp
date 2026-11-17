@@ -15,6 +15,7 @@
 // long-running request. Multiplayer has its own too (net.cpp): frames between
 // players must not wait behind one either.
 
+#include <web/diag.h>
 #include <web/net.h>
 #include <web/persist.h>
 #include <web/state.h>
@@ -387,6 +388,7 @@ int main(int argc, char **argv) {
 
     setup_control();
     web::net_setup();
+    web::diag_setup(state);
 
     if (state.symsys->get_device_manager()->total() > 0) {
         if (state.stage_two()) {
@@ -416,7 +418,8 @@ int main(int argc, char **argv) {
         const int id = pending.id;
 
         control::response written;
-        if (write_piece(pending.request, written) || web::net_route(pending.request, written)) {
+        if (write_piece(pending.request, written) || web::net_route(pending.request, written)
+            || web::diag_route(pending.request, written)) {
             deliver(id, written);
             continue;
         }

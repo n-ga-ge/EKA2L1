@@ -71,6 +71,14 @@ catalogue. `POST /v1/ngage2/games/{uid}/launch` uses the same launch IPC as the
 Games GUI. Both endpoints keep the session attached to Games. The guest IPC
 agent is embedded in `control_guest`; its SDK sources live in `guest/ngage`.
 
+`GET /v1/web/diag` exists on the web frontend only and returns the counters
+behind the player's diagnostics (`src/emu/web/src/diag.cpp`, `web/diag.h`):
+`{ "v": 1, "uptimeMs", "speed", "graphics", "audio", "exits" }`. Each part is
+built and documented in `src/emu/web/src/diag_<part>.cpp` from the atomics in
+`common/webdiag/<part>.h`. Numbers are totals since the page loaded. Like
+`GET /v1/net` it is answered without the control lock, so it never reports
+"busy".
+
 `GET /v1/net` exists on the web frontend only and reports the Bluetooth link
 between players (`src/emu/web/src/net.cpp`, `services/bluetooth/protocols/web`).
 The page owns the transport and hands the emulator whole frames; this endpoint
