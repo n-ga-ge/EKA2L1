@@ -7,7 +7,10 @@
 //              { games: [{ slug, title, uid, status, variantOf, ... }] }, and
 //              <catalog>games/<slug>.json describes one: its title, app UID,
 //              control profile ("controls", shaped like a profile in games.js)
-//              and notes.
+//              and notes. An entry with "enhance": { "engine" } has an
+//              enhancement profile at <catalog>enhance/<engine>.json: where
+//              the game's engine draws its triangles, which the emulator
+//              takes as it is (PUT /v1/enhance/profile).
 //   "assets"   base URL the game files are served from; a game's card is
 //              <assets>games/<slug>.zip unless its entry has an absolute "zip".
 //   "fw"       URL of the firmware.
@@ -22,6 +25,7 @@
 let configPromise = null;
 let indexPromise = null;
 const games = new Map();
+const enhancements = new Map();
 
 async function fetchJson(url, options) {
   try {
@@ -68,6 +72,20 @@ export async function gameByUid(uid) {
   const matches = index.games.filter((game) => String(game.uid).toUpperCase() === wanted);
   const entry = matches.find((game) => !game.variantOf) || matches[0];
   return entry ? gameBySlug(entry.slug) : null;
+}
+
+// The enhancement profile of an engine, as the catalogue publishes it, or null.
+export function enhanceProfile(engine) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(String(engine))) return Promise.resolve(null);
+  if (!enhancements.has(engine)) {
+    enhancements.set(engine, siteConfig().then(async (config) => {
+      const profile = config.catalog ? await fetchJson(`${withSlash(config.catalog)}enhance/${engine}.json`) : null;
+      // One that did not arrive is fetched again the next time it is wanted.
+      if (!profile) enhancements.delete(engine);
+      return profile;
+    }));
+  }
+  return enhancements.get(engine);
 }
 
 // Where a game's card archive is downloaded from, or null.

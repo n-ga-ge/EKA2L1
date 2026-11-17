@@ -3,13 +3,13 @@
 //
 // Which control profiles the page has to choose from, and what it takes from
 // the site it is part of (see catalog.js): the running game's profile and
-// facts, and links back to the site.
+// facts, its enhancement profile, and links back to the site.
 //
 // The catalogue is asked after a game has started, so every answer arrives
 // late. Until then the page uses what games.js has (the standard layout, or a
 // built-in profile), and a page with no catalogue stays that way.
 
-import { catalogIndex, gameBySlug, gameByUid, siteConfig } from './catalog.js';
+import { catalogIndex, enhanceProfile, gameBySlug, gameByUid, siteConfig } from './catalog.js';
 import { GAME_PROFILES, STANDARD_PROFILE, gameFacts, profileFor, profileFromEntry } from './games.js';
 
 const fromCatalog = new Map(); // profile id -> profile built from a catalogue entry
@@ -93,6 +93,20 @@ async function findProfile(id) {
 export function lookUpProfile(id) {
   if (!profileLookups.has(id)) profileLookups.set(id, findProfile(id));
   return profileLookups.get(id);
+}
+
+// Fetches the enhancement profile a game's facts name (`enhance.engine`).
+// Resolves to it, or to null when the site has none by that name or what it
+// has is not a profile for that engine. The emulator checks the rest when it
+// is given the profile.
+export async function lookUpEnhancement(engine) {
+  try {
+    const profile = await enhanceProfile(engine);
+    return profile && profile.engine === engine && Array.isArray(profile.images) ? profile : null;
+  } catch (error) {
+    console.warn('enhancement profile ignored:', error);
+    return null;
+  }
 }
 
 // Replaces an Input's binding tables, as Input.setBindings does, but without

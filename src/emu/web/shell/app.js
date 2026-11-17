@@ -35,7 +35,7 @@ import { NGAGE_KEYS, STANDARD_PROFILE, keyName, padName } from './games.js';
 import { Input } from './input.js';
 import { Downloads, LoadError, beginLoad, fileSource, wantedFromParams } from './loader.js';
 import { MAX_PLAYERS, NAME_LENGTH, RelayTransport, Session, cleanCode, cleanGame, cleanName, errorText, gameFromUid, publicRooms, relayBase, relayHealthy } from './net.js';
-import { autoProfile, gameProfiles, lookUpGame, lookUpProfile, profileById, siteLinks, switchBindings } from './profiles.js';
+import { autoProfile, gameProfiles, lookUpEnhancement, lookUpGame, lookUpProfile, profileById, siteLinks, switchBindings } from './profiles.js';
 import { downloadBlob, exportFileName, exportSaves, importSaves, listSaves } from './saves.js';
 import { saveSettings, settings } from './settings.js';
 import { detectSupport } from './support.js';
@@ -173,6 +173,7 @@ async function launch(app) {
   setStatus(`Starting ${app.name}…`);
   await page.emu.call('POST', `/v1/apps/${app.uid}/launch`);
   page.app = app;
+  launches += 1;
   page.paused = false;
   page.userPaused = false;
   setup.hidden = true;
@@ -365,6 +366,7 @@ const pageTitle = document.title;
 let askedGame = null; // the game the catalogue was last asked about
 let askedProfile = null; // the layout chosen by name it was last asked for
 let appliedProfile = null; // the profile the input tables were last built from
+let launches = 0; // how many times a game was started in this session
 
 // Builds an element. Children are nodes or strings, and strings become text:
 // names and notes from the catalogue are never parsed as HTML.
@@ -422,9 +424,13 @@ function followCatalogue() {
       lookUpGame(page.app.uid, slug).then((game) => {
         if (!game || askedGame !== wanted) return;
         page.game = game;
+        followEnhancement();
         profilesChanged();
       }).catch((error) => console.warn('catalogue profile not applied:', error));
     }
+    // Also for a game whose facts are here already: it may have been closed
+    // and started again.
+    followEnhancement();
   }
 
   const chosen = settings.profile;
@@ -642,6 +648,193 @@ function applyDisplay() {
   canvas.style.imageRendering = filter.id === 'nearest' ? 'pixelated' : 'auto';
   $('stage').style.setProperty('--aspect', `${page.screen.width} / ${page.screen.height}`);
   page.surface = { width, height, filter: filter.id, fill: fill.id };
+  applyEnhance();
+}
+
+// --- 3D resolution -----------------------------------------------------------------
+//
+// A game draws its 3D itself, pixel by pixel, at the phone's resolution. For
+// a game whose catalogue entry names an enhancement profile, the emulator can
+// catch the triangles the game's engine hands to its own rasteriser and draw
+// them again at a larger size (the fork's src/emu/enhance). The page's part
+// is to fetch the profile, hand it to the emulator, and say which size and
+// which texture filter the visitor chose. An emulator from before any of that
+// existed answers 404 to these routes, and one that can only capture leaves
+// `scale` out of its answers: the dialog then says the setting is not
+// available. A page without a catalogue never sends any of this.
+
+// `scale` is what PATCH /v1/enhance takes: 0 switches the enhancement off, a
+// number is that many times the game's own resolution, 'auto' follows the
+// canvas.
+const ENHANCE_SCALES = [
+  { id: 'off', scale: 0, label: 'Off' },
+  ...[2, 3, 4].map((n) => ({ id: String(n), scale: n, label: `${n}×` })),
+  { id: 'auto', scale: 'auto', label: 'Match the display' },
+];
+
+const ENHANCE_FILTERS = [
+  { id: 'nearest', label: 'Sharp', hint: 'Textures keep their own pixels, as the game shows them.' },
+  { id: 'linear', label: 'Smooth', hint: 'Textures are blended, which hides their pixels at a larger size.' },
+];
+
+// What the page knows about the running game's enhancement, or null when the
+// catalogue names none for it: { engine, beta, note } (games.js), and
+//   state    'loading' (the profile is on its way), 'failed' (it could not be
+//            fetched, or the emulator refused it), 'missing' (this emulator
+//            cannot draw a game's 3D itself) or 'ready'
+//   profile  the profile, once fetched
+//   launch   the launch for which the emulator answered to the profile, and
+//   loaded   whether it took it
+//   sent     the { scale, filter } it was last told
+//   answer   its last answer (as GET /v1/enhance gives it), or null
+page.enhance = null;
+let enhanceHeld = false; // the emulator holds a profile this page gave it
+let enhanceWork = Promise.resolve();
+
+// The requests go one after the other: a profile before the choice that is
+// made for it, and an unload before the next profile.
+function enhanceRequest(work) {
+  enhanceWork = enhanceWork.then(work).catch((error) => console.warn('3D resolution not applied:', error)).then(enhanceChanged);
+  return enhanceWork;
+}
+
+function enhanceChanged() {
+  if ($('display').open) renderEnhance();
+}
+
+function enhanceChoice() {
+  return {
+    scale: ENHANCE_SCALES.find((item) => item.id === settings.display.enhance) || ENHANCE_SCALES[0],
+    filter: ENHANCE_FILTERS.find((item) => item.id === settings.display.enhanceFilter) || ENHANCE_FILTERS[0],
+  };
+}
+
+// Keeps page.enhance in step with the running game: called when a game
+// starts and when the catalogue's facts about it arrive.
+function followEnhancement() {
+  const game = runningGame();
+  const wanted = game ? game.enhance : null;
+  const current = page.enhance;
+  // The same game, started again: what was fetched for it still holds. A
+  // profile that did not arrive is asked for again.
+  if (current && wanted && current.engine === wanted.engine && (current.profile || current.state === 'loading')) return;
+
+  if (current) {
+    page.enhance = null;
+    enhanceRequest(async () => {
+      if (!enhanceHeld) return;
+      enhanceHeld = false;
+      await page.emu.request('DELETE', '/v1/enhance/profile');
+    });
+  }
+  if (!wanted) return;
+
+  const enhance = { ...wanted, state: 'loading', profile: null, launch: 0, loaded: false, sent: null, answer: null };
+  page.enhance = enhance;
+  lookUpEnhancement(wanted.engine).then((profile) => {
+    if (page.enhance !== enhance) return;
+    if (profile) enhance.profile = profile;
+    else enhance.state = 'failed';
+    applyEnhance();
+    enhanceChanged();
+  });
+}
+
+// Hands the emulator the profile (once per launch) and the visitor's choice.
+function applyEnhance() {
+  const enhance = page.enhance;
+  if (!page.emu || !page.app || !enhance || !enhance.profile) return;
+  const launch = launches;
+  const choice = enhanceChoice();
+  const wanted = { scale: choice.scale.scale, filter: choice.filter.id };
+
+  enhanceRequest(async () => {
+    if (page.enhance !== enhance || !page.app || launch !== launches) return;
+
+    if (enhance.launch !== launch) {
+      // Again after every launch: a restart ends the game's process, and the
+      // emulator looks the profile's addresses up when it is given one.
+      Object.assign(enhance, { state: 'loading', loaded: false, sent: null, answer: null });
+      let put;
+      try {
+        put = await page.emu.request('PUT', '/v1/enhance/profile', enhance.profile);
+      } catch (error) {
+        enhance.state = 'failed';
+        throw error;
+      }
+      if (put.ok) {
+        enhanceHeld = true;
+        enhance.loaded = true;
+        enhance.launch = launch;
+      } else if ([404, 405, 501].includes(put.status)) {
+        // An emulator from before this route existed.
+        enhance.state = 'missing';
+        enhance.launch = launch;
+      } else {
+        // 400 is a profile the emulator does not take, and asking again
+        // would not change that. Anything else (it was not ready, say) is
+        // tried again with the next change.
+        enhance.state = 'failed';
+        if (put.status === 400) enhance.launch = launch;
+        console.warn(`enhancement profile ${enhance.engine} not loaded (${put.status}): ${put.text()}`);
+      }
+    }
+    if (!enhance.loaded) return;
+
+    // The same choice need not be said twice, except the one that follows
+    // the canvas, whose size may be what changed.
+    const { sent } = enhance;
+    if (sent && sent.scale === wanted.scale && sent.filter === wanted.filter && wanted.scale !== 'auto') return;
+    const patch = await page.emu.request('PATCH', '/v1/enhance', wanted);
+    enhance.sent = wanted;
+    enhance.answer = patch.ok ? patch.json() : null;
+    enhance.state = enhance.answer && enhance.answer.scale !== undefined ? 'ready' : 'missing';
+  });
+}
+
+// Asks the emulator how the profile is doing now. Whether it matches the
+// game's code is only known once the game has loaded it, which is after the
+// requests of applyEnhance().
+function refreshEnhance() {
+  const enhance = page.enhance;
+  if (!enhance || !enhance.loaded) return Promise.resolve();
+  return enhanceRequest(async () => {
+    if (page.enhance !== enhance || !enhance.loaded) return;
+    const status = await page.emu.request('GET', '/v1/enhance');
+    if (status.ok) enhance.answer = status.json();
+  });
+}
+
+function renderEnhance() {
+  const enhance = page.enhance;
+  const choice = enhanceChoice();
+  const fill = (select, items, chosen) => {
+    if (!select.options.length) select.replaceChildren(...items.map((item) => el('option', { value: item.id }, item.label)));
+    select.value = chosen.id;
+  };
+  fill($('enhance-select'), ENHANCE_SCALES, choice.scale);
+  fill($('enhance-filter-select'), ENHANCE_FILTERS, choice.filter);
+
+  $('enhance-settings').hidden = !enhance;
+  if (!enhance) return;
+  $('enhance-beta').hidden = !enhance.beta;
+  // The textures only matter while the 3D is drawn again.
+  $('enhance-filter-select').disabled = choice.scale.id === 'off';
+
+  const { width, height } = page.screen;
+  const flat = 'Menus, text and other flat pictures stay as the game draws them.';
+  $('enhance-hint').textContent = choice.scale.id === 'off' ? `The game draws its 3D itself at ${width}×${height}, as on the phone.`
+    : choice.scale.id === 'auto' ? `The game's 3D is drawn again by the graphics card, at the size the picture is shown at. ${flat}`
+      : `The game's 3D is drawn again by the graphics card at ${choice.scale.scale} times the size, ${width * choice.scale.scale}×${height * choice.scale.scale}. ${flat}`;
+  $('enhance-filter-hint').textContent = choice.scale.id === 'off' ? '' : choice.filter.hint;
+
+  $('enhance-note').textContent = [
+    enhance.beta ? 'Beta: nobody has played this game through this way yet, so parts of the picture may be missing or wrong.' : '',
+    enhance.note].filter(Boolean).join(' ');
+  $('enhance-state').textContent = enhance.state === 'loading' ? 'Fetching what this game needs for it…'
+    : enhance.state === 'failed' ? 'Not available: what this game needs for it could not be loaded.'
+      : enhance.state === 'missing' ? 'Not available in this version of the player. Your choice is kept, and changes nothing for now.'
+        : enhance.answer && enhance.answer.active === false ? 'This copy of the game is not one it knows, so the choice changes nothing.' : '';
 }
 
 function renderDisplay() {
@@ -663,6 +856,7 @@ function renderDisplay() {
   $('resolution-hint').textContent = `Canvas ${width}×${height} (game screen ${page.screen.width}×${page.screen.height}).`;
   $('fill-hint').textContent = `${FILLS.find((item) => item.id === fillSelect.value).hint} `
     + 'Beta. It only changes how the picture is shown: the game draws the same picture and does not show more of its world.';
+  renderEnhance();
 }
 
 function wireDisplayDialog() {
@@ -670,13 +864,15 @@ function wireDisplayDialog() {
     settings.display.filter = $('filter-select').value;
     settings.display.resolution = $('resolution-select').value;
     settings.display.fill = $('fill-select').value;
+    settings.display.enhance = $('enhance-select').value;
+    settings.display.enhanceFilter = $('enhance-filter-select').value;
     saveSettings();
     applyDisplay();
     renderDisplay();
   };
-  $('filter-select').addEventListener('change', change);
-  $('resolution-select').addEventListener('change', change);
-  $('fill-select').addEventListener('change', change);
+  for (const id of ['filter-select', 'resolution-select', 'fill-select', 'enhance-select', 'enhance-filter-select']) {
+    $(id).addEventListener('change', change);
+  }
 
   let pending = 0;
   const resized = () => {
@@ -783,6 +979,8 @@ function renderGuide() {
     <h3>Display</h3>
     <ul>
       <li><span></span><span><b>Menu → Display</b> chooses how the ${page.screen.width}×${page.screen.height} game picture is scaled: sharp pixels, smooth, FSR 1.0, pixel-art scalers and screen effects.</span></li>
+${page.enhance && page.enhance.state === 'ready' ? `
+      <li><span></span><span><b>3D resolution</b>${page.enhance.beta ? ' (beta)' : ''} is there for this game: its 3D can be drawn again by the graphics card at a larger size than the phone's, while menus and text stay as the game draws them.</span></li>` : ''}
       <li><span></span><span><b>Fill the screen</b> (beta) uses the space a wide screen leaves beside the upright picture: stretch the picture over it, or keep its shape and fill the space with a soft, blurred copy of it. The game draws the same picture either way; no more of its world is shown.</span></li>
       <li><span></span><span>None of these change the game's speed, which depends on your device's processor.</span></li>
     </ul>`);
@@ -1168,7 +1366,7 @@ function wireControls() {
     else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
   });
   entry('m-controls', () => { renderControls(); $('controls').showModal(); });
-  entry('m-display', () => { renderDisplay(); $('display').showModal(); });
+  entry('m-display', () => { renderDisplay(); $('display').showModal(); refreshEnhance(); });
   entry('m-saves', async () => { await renderSaves(); $('saves').showModal(); });
   entry('m-multiplayer', openMultiplayer);
   entry('m-load', async () => { await closeGame(); await showSetup(); });
@@ -1183,7 +1381,11 @@ function wireControls() {
     setTimeout(() => { if (page.app && !statusEl.classList.contains('error')) setStatus(page.app.name); }, 4000);
   });
   entry('m-guide', () => { renderGuide(); $('guide').showModal(); });
-  entry('m-info', showInfo);
+  entry('m-info', async () => {
+    // With the emulator's latest word on the 3D profile, if it comes soon.
+    await Promise.race([refreshEnhance(), new Promise((resolve) => setTimeout(resolve, 1000))]);
+    showInfo();
+  });
 
   // Links back to the site this page is part of; a bare player has none.
   siteLinks().then((links) => {
@@ -1255,8 +1457,15 @@ function showInfo() {
   if (page.emu) {
     const stats = page.emu.stats();
     const surface = page.surface ? ` · canvas ${page.surface.width}×${page.surface.height} (${page.surface.filter})` : '';
+    const enhance = page.enhance;
+    const answer = enhance && enhance.answer;
+    const match = answer ? `${answer.active ? 'matches' : 'does not match'} the game, ` : '';
+    const threeD = !enhance ? '' : ` · 3D profile ${escapeHtml(enhance.engine)}: ` + (enhance.state === 'loading' ? 'loading'
+      : enhance.state === 'failed' ? 'not loaded'
+        : enhance.state === 'missing' ? `${match}this emulator cannot draw it`
+          : `${match}${!answer.scale ? 'off' : `drawn at ${escapeHtml(String(answer.scale))}${typeof answer.scale === 'number' ? '×' : ''}`}`);
     html += `<h3>Session</h3><ul><li><span></span><span>${Math.round(stats.frames)} frames · ${page.fps.toFixed(1)} fps · heap ${stats.heapMB.toFixed(0)} MB · `
-      + `graphics ${(stats.frames ? stats.graphicsBusyMs / stats.frames : 0).toFixed(2)} ms/frame · gamepads ${page.gamepads}${surface}</span></li></ul>`;
+      + `graphics ${(stats.frames ? stats.graphicsBusyMs / stats.frames : 0).toFixed(2)} ms/frame · gamepads ${page.gamepads}${surface}${threeD}</span></li></ul>`;
   }
 
   $('info-body').innerHTML = html;
