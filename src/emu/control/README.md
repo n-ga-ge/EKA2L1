@@ -86,3 +86,37 @@ shows what the emulator makes of them:
 | `connections[]` | `peer`, `id` and `initiator` (which together name a connection), `protocol`, `port`, `state` (`connecting`, `queued`, `open`, `closed`), `txBytes`, `rxBytes`, `rxQueued` (received and not yet read by the guest). |
 | `totals` | `framesIn`, `framesOut` (since the page loaded), and for the running guest `badFrames`, `seqErrors`, `connectsIn`, `connectsOut`, `refused`, `inquiries`, `selections`, `sdpQueries`. |
 | `events[]` | The last 32 operations: `ms` (since the guest started), `op` (`bind`, `listen`, `unlisten`, `accept`, `incoming`, `connect`, `send`, `shutdown`, `close`, `inquiry`, `select`, `sdp-connect`, `sdp-query`, `link-up`, `link-down`, `peer-join`, `peer-announce`, `peer-leave`, `overflow`), `protocol`, `port`, `peer` and `result`, a Symbian error code (0 is success, -36 a lost connection, -34 nobody to connect to, -25 the other side closed). |
+
+## Looking into the guest, and enhancement profiles
+
+These routes are served by `src/emu/enhance` on every frontend that links
+`control_native`. The hooks they use exist only on the interpreter (`dyncom`):
+`arm::core::set_hooks` puts a call in front of the instruction at an address
+without changing guest code, so a hook may sit on a function that runs
+thousands of times a frame. On another backend the routes answer, but no hook
+is ever hit.
+
+Addresses and UIDs are JSON numbers or hexadecimal strings (`"0xE00A280C"`).
+An `at` together with an `image` (an executable's file name, any letter case)
+is an offset from the start of that image's code section, resolved for every
+process the image is loaded in and again whenever code is loaded or a process
+ends. Without `image` it is an absolute address.
+
+| Route | Content |
+|---|---|
+| `GET /v1/debug/codesegs` | Every code segment: `name`, `path`, `uid3`, `hash` (XXH32 of the code as it is in the file, seed `0x5B001101`), `rom`, `codeBase` (linked address), `codeSize`, `dataBase`, `dataSize`, `bssSize`, `exports`, `romCode`, and `attaches[]` (`process`, `uid`, and where `code` and `data` run there). |
+| `GET /v1/debug/threads` | Every thread: `name`, `id`, `process`, `processUid`, `state`, `running`, `regs[16]`, `cpsr`. The running thread's registers are read from the core; pause the emulator for a steady picture. |
+| `GET /v1/debug/mem?addr=&len=&process=` | Guest memory as bytes (at most 16 MB). `process` is a UID; without it the process that is running at that moment. Unmapped pages read as zero and `X-Mapped-Bytes` says how much was mapped. |
+| `PUT /v1/debug/mem` | `{ "addr", "hex", "process" }`: write bytes. Code that was already translated keeps running as it was. |
+| `POST /v1/debug/profile` | `{ "ms": 1000, "limit": 400 }`: sample the program counter and the link register for that long, from the request's own thread, and return the most frequent pairs as `top[]` of `[pc, lr, count]`, with `samples` and `distinct`. |
+| `POST /v1/debug/hooks` | `{ "image", "hash", "at", "limit": 16, "stack": 0, "watch": [], "skip": false, "return" }`: hook an address. The first `limit` hits record the registers, `stack` words from the stack pointer, and the value of each `watch` expression; every hit is counted. With `skip` the hooked function returns at once (`return` sets r0), so the hook must be on a function's first instruction. |
+| `GET /v1/debug/hooks`, `GET /v1/debug/hooks/{id}` | The hooks with their hit counts; one hook with what it `captured[]` (`regs`, `cpsr`, `stack`, `values`, `thread`). |
+| `DELETE /v1/debug/hooks/{id}`, `DELETE /v1/debug/hooks` | Remove one (its last state is returned) or all. |
+| `PUT /v1/enhance/profile` | Load an enhancement profile: which addresses of which images begin and end a frame and draw triangles, and how to read a triangle there. The format and its expression language are described in the arcade repository's `docs/enhancements.md` and `catalog/enhance.schema.json`. Returns the status below. `DELETE` unloads it. |
+| `GET /v1/enhance` | `available` (a profile is loaded), `engine`, `active` (one of its images is loaded), `replace`, `frames`, `triangles` and `textures` of the last frame, `droppedDraws`, and `hooks[]` with `addresses`, `hits` and `faults` (draws dropped because memory they name is not mapped). |
+| `PATCH /v1/enhance` | `{ "replace": true }`: whether hooks marked `skip` return from the guest function instead of letting it draw. Off by default. |
+| `GET /v1/enhance/frame` | The last completed frame: `width`, `height`, `vertices` (seven numbers each: x, y, z, w, u, v, colour as `0xAARRGGBB`), `draws[]` (`first`, `count`, `texture`, `blend`, `depth`, `hook`), `textures[]` and `target`. |
+| `GET /v1/enhance/texture?index=`, `GET /v1/enhance/target` | A texture of that frame, or the buffer the guest draws into, read from guest memory now: two little-endian words (width, height), then R, G, B, A bytes. |
+
+`enhance::set_sink` (`enhance/enhance.h`) hands every completed frame to
+whatever draws it, on the thread that runs the guest.
