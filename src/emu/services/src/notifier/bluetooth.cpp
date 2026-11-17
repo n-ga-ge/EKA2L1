@@ -21,6 +21,12 @@
 
 #include <utils/err.h>
 
+#include <common/platform.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <services/bluetooth/protocols/web/overall_web.h>
+#endif
+
 #include <array>
 #include <cstring>
 
@@ -76,6 +82,18 @@ namespace eka2l1::epoc::notifier {
             complete_info.complete(epoc::error_not_supported);
             return;
         }
+
+#if EKA2L1_PLATFORM(WEB)
+        // The players are the members of the page's room; none of what follows applies.
+        epoc::bt::device_address room_member{};
+        if (!epoc::bt::web::pick_peer(btman->get_midman(), room_member)) {
+            complete_info.complete(epoc::error_not_found);
+            return;
+        }
+
+        complete_info.complete(write_selected_device(kern_, response, complete_info, room_member));
+        return;
+#endif
 
         auto *midman = static_cast<epoc::bt::midman_inet *>(btman->get_midman());
 

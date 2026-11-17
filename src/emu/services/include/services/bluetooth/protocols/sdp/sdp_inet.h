@@ -38,7 +38,8 @@ namespace eka2l1::epoc::bt {
     class sdp_inet_protocol;
 
     class sdp_inet_net_database: public socket::net_database {
-    private:
+    // Not private: the browser build keeps the queries and replaces the transport (web/sdp_web.h).
+    protected:
         internet::inet_bridged_protocol *inet_pro_;
         sdp_inet_protocol *protocol_;
         asker_inet bt_port_asker_;
@@ -59,11 +60,11 @@ namespace eka2l1::epoc::bt {
         const char *target_pdu_buffer_;
         std::uint32_t target_pdu_buffer_size_;
 
-        void handle_connect_query(const char *record_buf, const std::uint32_t record_size);
+        virtual void handle_connect_query(const char *record_buf, const std::uint32_t record_size);
         void handle_service_query(const char *record_buf, const std::uint32_t record_size);
         void handle_encoded_query(const char *record_buf, const std::uint32_t record_size);
         void handle_retrieve_buffer_query();
-        void send_pdu_packet(const char *buf, const std::uint32_t buf_size);
+        virtual void send_pdu_packet(const char *buf, const std::uint32_t buf_size);
         void handle_normal_query_complete(const std::uint8_t *param, const std::uint32_t param_len);
         void close_connect_handle(const bool should_wait = false);
 

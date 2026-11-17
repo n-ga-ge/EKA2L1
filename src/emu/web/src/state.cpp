@@ -18,6 +18,7 @@
 #include <kernel/kernel.h>
 #include <kernel/libmanager.h>
 
+#include <services/bluetooth/protocols/web/overall_web.h>
 #include <services/init.h>
 #include <services/window/screen.h>
 #include <services/window/window.h>
@@ -139,6 +140,12 @@ namespace eka2l1::web {
         if (stage_two_inited) {
             register_draw_callback();
             the_sys->initialize_user_parties();
+        }
+
+        // Multiplayer: an N-Gage game looks at the phone's Bluetooth switch
+        // before it hosts or joins.
+        if (the_sys->get_kernel_system()->is_eka1()) {
+            epoc::bt::web::switch_bluetooth_on(the_sys->get_io_system());
         }
     }
 

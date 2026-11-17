@@ -387,3 +387,23 @@ if (APPLE)
 else()
         target_sources(epocservs PRIVATE src/bluetooth/protocols/mdns_socket.cpp)
 endif()
+
+# Bluetooth between browser players: the inet classes with their transport
+# replaced by frames the page carries.
+if (EKA2L1_WEB)
+        target_sources(epocservs PRIVATE
+                include/services/bluetooth/protocols/web/link.h
+                include/services/bluetooth/protocols/web/midman_web.h
+                include/services/bluetooth/protocols/web/overall_web.h
+                include/services/bluetooth/protocols/web/resolver_web.h
+                include/services/bluetooth/protocols/web/sdp_web.h
+                include/services/bluetooth/protocols/web/socket_web.h
+                include/services/bluetooth/protocols/web/stack.h
+                src/bluetooth/protocols/web/link.cpp
+                src/bluetooth/protocols/web/midman_web.cpp
+                src/bluetooth/protocols/web/overall_web.cpp
+                src/bluetooth/protocols/web/resolver_web.cpp
+                src/bluetooth/protocols/web/sdp_web.cpp
+                src/bluetooth/protocols/web/socket_web.cpp
+                src/bluetooth/protocols/web/stack.cpp)
+endif()

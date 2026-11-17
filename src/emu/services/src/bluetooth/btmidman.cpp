@@ -20,6 +20,12 @@
 #include <services/bluetooth/protocols/btmidman_inet.h>
 #include <services/bluetooth/btmidman.h>
 
+#include <common/platform.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <services/bluetooth/protocols/web/overall_web.h>
+#endif
+
 namespace eka2l1::epoc::bt {
     midman::midman()
         : local_name_(u"eka2l1")
@@ -27,6 +33,11 @@ namespace eka2l1::epoc::bt {
     }
     
     std::unique_ptr<midman> make_bluetooth_midman(const eka2l1::config::state &conf, const std::uint32_t reserved_stack_type) {
+#if EKA2L1_PLATFORM(WEB)
+        // A browser has no sockets: Bluetooth goes through the page instead.
+        return web::make_midman();
+#else
         return std::make_unique<midman_inet>(conf);
+#endif
     }
 }

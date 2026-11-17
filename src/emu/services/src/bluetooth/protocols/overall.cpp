@@ -26,9 +26,20 @@
 #include <services/socket/server.h>
 
 #include <common/log.h>
+#include <common/platform.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <services/bluetooth/protocols/web/overall_web.h>
+#endif
 
 namespace eka2l1::epoc::bt {
     void add_bluetooth_stack_protocols(socket_server *sock, epoc::bt::midman *mm, const bool oldarch) {
+#if EKA2L1_PLATFORM(WEB)
+        // No inet protocol underneath, and so no looper thread to start for it.
+        web::add_protocols(sock, mm, oldarch);
+        return;
+#endif
+
         internet::inet_bridged_protocol *protocol = reinterpret_cast<internet::inet_bridged_protocol*>(sock->find_protocol(internet::INET6_ADDRESS_FAMILY, internet::INET_TCP_PROTOCOL_ID));
         protocol->initialize_looper();  // NOTE: Real non-internet bluetooth stack will not need this.
 

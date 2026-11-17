@@ -2,9 +2,11 @@
 # that owns the emulator state, a graphics thread and an OS thread, driven from
 # the page through the control API instead of JNI.
 add_executable(eka2l1_web
+        include/web/net.h
         include/web/persist.h
         include/web/state.h
         src/main.cpp
+        src/net.cpp
         src/persist.cpp
         src/state.cpp
         src/thread.cpp

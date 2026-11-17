@@ -70,3 +70,19 @@ retain their process-exit behavior.
 catalogue. `POST /v1/ngage2/games/{uid}/launch` uses the same launch IPC as the
 Games GUI. Both endpoints keep the session attached to Games. The guest IPC
 agent is embedded in `control_guest`; its SDK sources live in `guest/ngage`.
+
+`GET /v1/net` exists on the web frontend only and reports the Bluetooth link
+between players (`src/emu/web/src/net.cpp`, `services/bluetooth/protocols/web`).
+The page owns the transport and hands the emulator whole frames; this endpoint
+shows what the emulator makes of them:
+
+| Field | Content |
+|---|---|
+| `link` | `up`, `self` (our id in the room, 0 while down), `name` (the device name the page gave), `thread` (whether the link's thread was started: it is not until the link first comes up), `dropped` (frames thrown away because the emulator fell more than 8 MB behind; every connection is reset when that happens). |
+| `attached` | Whether a guest is running and has a Bluetooth stack. Without one the lists below are empty and `address` is null. |
+| `address` | The device's Bluetooth address, `aa:bb:cc:dd:ee:ff`. A new one for every start of the emulator. |
+| `peers[]` | `id`, and `address` and `name` once that member's emulator has announced itself (null before). |
+| `listeners[]` | `protocol` (`l2cap` or `rfcomm`), `port`, `queued` (connections not yet accepted by the guest), `accepting` (the guest has an accept pending). L2CAP port 1 is the guest's own service discovery server. |
+| `connections[]` | `peer`, `id` and `initiator` (which together name a connection), `protocol`, `port`, `state` (`connecting`, `queued`, `open`, `closed`), `txBytes`, `rxBytes`, `rxQueued` (received and not yet read by the guest). |
+| `totals` | `framesIn`, `framesOut` (since the page loaded), and for the running guest `badFrames`, `seqErrors`, `connectsIn`, `connectsOut`, `refused`, `inquiries`, `selections`, `sdpQueries`. |
+| `events[]` | The last 32 operations: `ms` (since the guest started), `op` (`bind`, `listen`, `unlisten`, `accept`, `incoming`, `connect`, `send`, `shutdown`, `close`, `inquiry`, `select`, `sdp-connect`, `sdp-query`, `link-up`, `link-down`, `peer-join`, `peer-announce`, `peer-leave`, `overflow`), `protocol`, `port`, `peer` and `result`, a Symbian error code (0 is success, -36 a lost connection, -34 nobody to connect to, -25 the other side closed). |
