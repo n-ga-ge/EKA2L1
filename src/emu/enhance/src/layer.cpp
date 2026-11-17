@@ -363,6 +363,11 @@ void main() {
         return composed_;
     }
 
+    std::uint64_t layer::presents() {
+        const std::lock_guard<std::mutex> guard(lock_);
+        return presents_;
+    }
+
     std::size_t layer::cached_textures() {
         const std::lock_guard<std::mutex> guard(lock_);
         return cache_size_;
@@ -472,8 +477,17 @@ void main() {
     }
 
     bool layer::compose(epoc::screen *scr, drivers::graphics_driver *driver, kernel_system *) {
+        return compose_picture(scr, driver, false);
+    }
+
+    bool layer::compose_redrawn(epoc::screen *scr, drivers::graphics_driver *driver) {
+        return compose_picture(scr, driver, true);
+    }
+
+    bool layer::compose_picture(epoc::screen *scr, drivers::graphics_driver *driver, const bool from_screen) {
         {
             const std::lock_guard<std::mutex> guard(lock_);
+            presents_++;
             if (!wanted()) {
                 return false;
             }
@@ -503,7 +517,10 @@ void main() {
 
         // Without a pixel in the key colour nothing of the frame would show,
         // and the plain copy of the picture is right as it is.
-        const bool has_key = !shown->screen_pixels.empty() || picture_has_key(scr);
+        // Through the window server the guest's picture is a bitmap of its own,
+        // not the screen's framebuffer, and is not looked for here: the
+        // triangles go only where the screen texture has the key colour.
+        const bool has_key = !shown->screen_pixels.empty() || from_screen || picture_has_key(scr);
         {
             const std::lock_guard<std::mutex> guard(lock_);
             if (has_key) {
@@ -513,7 +530,7 @@ void main() {
             }
         }
 
-        return has_key && render(scr, driver, shown, linear);
+        return has_key && render(scr, driver, shown, linear, from_screen);
     }
 
     void layer::inject(const std::shared_ptr<const frame> &injected) {
@@ -558,6 +575,7 @@ void main() {
             // Another driver: what was made with the old one went with it.
             driver_ = driver;
             triangle_program_ = compose_program_ = vertex_buffer_ = input_layout_ = 0;
+            screen_copy_ = 0;
             screen_texture_ = 0;
             cache_.clear();
             cache_bytes_ = 0;
@@ -656,8 +674,13 @@ void main() {
             if (screen_texture_) {
                 builder->destroy(screen_texture_);
             }
+
+            if (screen_copy_) {
+                builder->destroy_bitmap(screen_copy_);
+            }
         }
 
+        screen_copy_ = 0;
         cache_.clear();
         cache_bytes_ = 0;
         screen_texture_ = 0;
@@ -833,7 +856,8 @@ void main() {
         uploads_ += uploaded;
     }
 
-    bool layer::render(epoc::screen *scr, drivers::graphics_driver *driver, const std::shared_ptr<const frame> &shown, const bool linear) {
+    bool layer::render(epoc::screen *scr, drivers::graphics_driver *driver, const std::shared_ptr<const frame> &shown, const bool linear,
+        const bool from_screen) {
         if (!driver || !scr->screen_texture || !ensure_resources(driver)) {
             return false;
         }
@@ -847,6 +871,35 @@ void main() {
         // injected frame brought.
         drivers::handle picture = scr->dsa_texture;
         eka2l1::vec2 picture_size = scr->current_mode().size;
+
+        if (from_screen && f.screen_pixels.empty()) {
+            // The window server drew the guest's bitmap into the screen
+            // texture at its scale; the picture pass below reads the texture it
+            // draws into, so it reads a copy at 1x, a texel per guest pixel.
+            if (!screen_copy_ || screen_copy_size_ != picture_size) {
+                if (screen_copy_) {
+                    builder.destroy_bitmap(screen_copy_);
+                }
+                screen_copy_ = drivers::create_bitmap(driver, picture_size, 32);
+                screen_copy_size_ = picture_size;
+            }
+
+            if (!screen_copy_) {
+                return false;
+            }
+
+            const float scale = scr->display_scale_factor;
+            const eka2l1::vec2 scaled(static_cast<int>(picture_size.x * scale), static_cast<int>(picture_size.y * scale));
+            builder.bind_bitmap(screen_copy_);
+            builder.set_feature(drivers::graphics_feature::clipping, false);
+            builder.set_feature(drivers::graphics_feature::blend, false);
+            builder.set_feature(drivers::graphics_feature::depth_test, false);
+            builder.set_texture_filter(scr->screen_texture, true, drivers::filter_option::nearest);
+            builder.set_texture_filter(scr->screen_texture, false, drivers::filter_option::nearest);
+            builder.draw_bitmap(scr->screen_texture, 0, eka2l1::rect(eka2l1::vec2(0, 0), picture_size),
+                eka2l1::rect(eka2l1::vec2(0, 0), scaled), eka2l1::vec2(0, 0), 0.0f, 0);
+            picture = screen_copy_;
+        }
 
         if (!f.screen_pixels.empty()) {
             const eka2l1::vec3 size(static_cast<int>(f.screen_width), static_cast<int>(f.screen_height), 0);

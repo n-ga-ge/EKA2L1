@@ -269,6 +269,7 @@ namespace eka2l1::enhance {
             { "scale", scale_json }, { "auto", layer_ && layer_->automatic() },
             { "filter", (layer_ && layer_->linear()) ? "linear" : "nearest" },
             { "composed", static_cast<std::int64_t>(layer_ ? layer_->composed() : 0) },
+            { "presents", static_cast<std::int64_t>(layer_ ? layer_->presents() : 0) },
             { "cachedTextures", static_cast<std::int64_t>(layer_ ? layer_->cached_textures() : 0) },
             { "textureUploads", static_cast<std::int64_t>(layer_ ? layer_->uploads() : 0) },
             { "keyPixels", static_cast<std::int64_t>(key_pixels_) },

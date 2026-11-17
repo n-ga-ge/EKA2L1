@@ -66,6 +66,7 @@ namespace eka2l1::enhance {
         float scale_in_use();
 
         std::uint64_t composed();
+        std::uint64_t presents();
         std::size_t cached_textures();
         std::uint64_t uploads();
 
@@ -79,6 +80,7 @@ namespace eka2l1::enhance {
 
         float screen_scale(epoc::screen *scr, float usual) override;
         bool compose(epoc::screen *scr, drivers::graphics_driver *driver, kernel_system *kern) override;
+        bool compose_redrawn(epoc::screen *scr, drivers::graphics_driver *driver) override;
 
     private:
         struct cached_texture {
@@ -111,6 +113,7 @@ namespace eka2l1::enhance {
         // Presents left for which the screen keeps the layer's scale.
         std::uint32_t keep_ = 0;
         std::uint64_t composed_ = 0;
+        std::uint64_t presents_ = 0;
         std::uint64_t uploads_ = 0;
         std::size_t cache_size_ = 0;
 
@@ -143,6 +146,13 @@ namespace eka2l1::enhance {
         void drop_textures(drivers::graphics_command_builder *builder);
         void prepare_textures(drivers::graphics_command_builder &builder, const frame &f, bool linear,
             std::vector<drivers::handle> &handles);
-        bool render(epoc::screen *scr, drivers::graphics_driver *driver, const std::shared_ptr<const frame> &shown, bool linear);
+        bool render(epoc::screen *scr, drivers::graphics_driver *driver, const std::shared_ptr<const frame> &shown, bool linear,
+            bool from_screen = false);
+        bool compose_picture(epoc::screen *scr, drivers::graphics_driver *driver, bool from_screen);
+
+        // A 1x copy of the screen texture, the picture when the guest shows
+        // its frames through the window server.
+        drivers::handle screen_copy_ = 0;
+        eka2l1::vec2 screen_copy_size_;
     };
 }

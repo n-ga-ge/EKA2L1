@@ -345,6 +345,7 @@ namespace eka2l1::enhance {
             current_->has_target = has_target_;
             current_->target = target_;
             filled_ = 0;
+            skipped_.clear();
         }
 
         return *current_;
@@ -400,10 +401,24 @@ namespace eka2l1::enhance {
             break;
         }
 
-        case KIND_END:
-            building(pr);
+        case KIND_END: {
+            frame &f = building(pr);
+
+            // The key colour goes in now, not when each function returned:
+            // an engine that rasterises into a buffer of its own and copies
+            // that to the target at the end of the frame (Shadowkey, Call of
+            // Duty) would copy over it.
+            if (f.has_target) {
+                for (const auto &[first, count] : skipped_) {
+                    if (first + count <= f.vertices.size()) {
+                        key_pixels_ += fill_key(pr, f.target, f.vertices.data() + first, count);
+                    }
+                }
+            }
+            skipped_.clear();
             publish();
             break;
+        }
 
         case KIND_SET:
             for (const auto &[slot, value] : hook.sets) {
@@ -446,7 +461,11 @@ namespace eka2l1::enhance {
             if (current_ && layered) {
                 frame &f = *current_;
                 if (f.has_target && f.vertices.size() > filled_) {
-                    key_pixels_ += fill_key(pr, f.target, f.vertices.data() + filled_, f.vertices.size() - filled_);
+                    if (has_end_) {
+                        skipped_.emplace_back(filled_, f.vertices.size() - filled_);
+                    } else {
+                        key_pixels_ += fill_key(pr, f.target, f.vertices.data() + filled_, f.vertices.size() - filled_);
+                    }
                 }
                 filled_ = f.vertices.size();
             }

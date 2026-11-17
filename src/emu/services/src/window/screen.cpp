@@ -511,6 +511,12 @@ namespace eka2l1::epoc {
         eka2l1::drivers::command_list retrieved = builder.retrieve_command_list();
         driver->submit_command_list(retrieved);
 
+        if (performed) {
+            if (screen_compositor *const composing = compositor.load()) {
+                composing->compose_redrawn(this, driver);
+            }
+        }
+
         if (performed && sync_screen_buffer && (display_scale_factor == 1.0f)) {
             sync_screen_buffer_data(driver);
         }

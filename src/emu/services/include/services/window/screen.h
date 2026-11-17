@@ -96,6 +96,18 @@ namespace eka2l1::epoc {
          *          the scale this compositor asks for.
          */
         virtual bool compose(screen *scr, drivers::graphics_driver *driver, kernel_system *kern) = 0;
+
+        /**
+         * Called after the window server drew the screen texture, for a guest
+         * that shows its picture as a bitmap through the window server rather
+         * than through the screen's framebuffer. The picture is then the
+         * screen texture itself.
+         *
+         * \returns True when it drew the screen texture.
+         */
+        virtual bool compose_redrawn(screen *scr, drivers::graphics_driver *driver) {
+            return false;
+        }
     };
 
     struct screen {

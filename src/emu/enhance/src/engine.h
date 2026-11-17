@@ -193,6 +193,9 @@ namespace eka2l1::enhance {
         std::uint64_t key_pixels_ = 0;
         // Vertices of the frame being captured that are filled in the target already.
         std::size_t filled_ = 0;
+        // Ranges of the frame's vertices whose drawing the guest skipped, keyed
+        // into the target when the frame ends (profiles with an end hook).
+        std::vector<std::pair<std::size_t, std::size_t>> skipped_;
 
         std::unique_ptr<layer> layer_;
 
