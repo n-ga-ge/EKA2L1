@@ -118,6 +118,19 @@
       <select id="fill-select"></select>
     </label>
     <p class="hint" id="fill-hint"></p>
+    <!-- Only for a game the site has an enhancement profile for. -->
+    <div id="enhance-settings" hidden>
+      <label class="row"><span>3D resolution <small class="beta" id="enhance-beta">beta</small></span>
+        <select id="enhance-select"></select>
+      </label>
+      <p class="hint" id="enhance-hint"></p>
+      <p class="hint" id="enhance-note"></p>
+      <label class="row">3D textures
+        <select id="enhance-filter-select"></select>
+      </label>
+      <p class="hint" id="enhance-filter-hint"></p>
+      <p class="notice warn" id="enhance-state" role="status"></p>
+    </div>
     <form method="dialog"><button type="submit">Close</button></form>
   </dialog>
 
