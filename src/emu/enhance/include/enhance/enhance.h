@@ -113,12 +113,37 @@ namespace eka2l1::enhance {
         std::vector<vertex> vertices;
         std::vector<draw> draws;
         std::vector<texture_ref> textures;
+
+        // Only in a frame that was injected (`POST /v1/enhance/test-frame`),
+        // not captured. Pixels of textures that are not in guest memory: as
+        // many entries as `textures`, each empty or width times height
+        // 0xAABBGGRR words. And a picture that stands in for the guest's
+        // screen while this frame is shown, or nothing.
+        bool injected = false;
+        std::vector<std::vector<std::uint32_t>> texture_pixels;
+        std::uint32_t screen_width = 0, screen_height = 0;
+        std::vector<std::uint32_t> screen_pixels;
     };
+
+    /**
+     * The colour that marks, in the guest's own picture, where the triangles
+     * it did not draw itself belong. When replacing, every skipped triangle is
+     * filled into the profile's target in this colour (every pixel it
+     * touches), and whatever shows the frames puts them where the screen has
+     * it. Red and blue full, green zero: it survives a copy to a 12-bit
+     * screen, and games use it for "transparent" in their own bitmaps, so it
+     * does not occur in a finished picture.
+     */
+    static constexpr std::uint32_t KEY_COLOR_RGB = 0xFF00FF;
 
     /**
      * Receives every completed frame, on the thread that runs the guest. Set by
      * whatever draws the frames; without one they are only kept for
-     * `GET /v1/enhance/frame`.
+     * `GET /v1/enhance/frame`. Null means the frames before are of no use any
+     * more: the profile was unloaded or the process that drew them ended.
+     *
+     * It is called with the capture machine's lock held and must not call
+     * back into it, nor take the kernel lock.
      */
     class sink {
     public:

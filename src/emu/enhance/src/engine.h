@@ -28,6 +28,8 @@ namespace eka2l1 {
 }
 
 namespace eka2l1::enhance {
+    class layer;
+
     // What one hit of a debug hook recorded.
     struct hit {
         std::array<std::uint32_t, 16> regs;
@@ -110,9 +112,22 @@ namespace eka2l1::enhance {
         std::vector<std::uint32_t> addresses;
     };
 
+    // Bytes of one pixel of this format; zero for none.
+    std::uint32_t pixel_size(texture_format format);
+
+    /**
+     * Fill every pixel these triangles touch (three corners each) in the
+     * buffer the guest's rasteriser draws into, in the key colour.
+     *
+     * \returns The number of pixels written; zero when the target's format
+     *          cannot hold the key colour or its memory is not mapped.
+     */
+    std::uint64_t fill_key(kernel::process *pr, const target_ref &target, const vertex *corners, std::size_t count);
+
     class engine {
     public:
         explicit engine(system *sys);
+        ~engine();
 
         static engine &of(system *sys);
 
@@ -122,6 +137,18 @@ namespace eka2l1::enhance {
         void set_replace(bool replace);
         std::shared_ptr<const frame> last_frame();
         bool decode(std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba);
+
+        // The same with the kernel lock already held, and a hash of the bytes
+        // a texture is made of, to see whether it changed without decoding it.
+        bool decode_locked(std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba);
+        bool hash_locked(std::uint32_t process_uid, const texture_ref &texture, std::uint64_t &hash);
+
+        /**
+         * The guest is presenting its screen. The frame being captured, if it
+         * has triangles, is the one in that picture: complete it now, not at
+         * the next frame boundary, which comes after the picture was shown.
+         */
+        void complete_at_present();
 
     private:
         // Where a hooked address leads: a debug hook or a profile hook, for
@@ -159,6 +186,16 @@ namespace eka2l1::enhance {
         bool replace_ = false;
         sink *sink_ = nullptr;
 
+        // The target the last `begin` hook read, for frames that start
+        // without one (after a present completed the frame before).
+        bool has_target_ = false;
+        target_ref target_;
+        std::uint64_t key_pixels_ = 0;
+        // Vertices of the frame being captured that are filled in the target already.
+        std::size_t filled_ = 0;
+
+        std::unique_ptr<layer> layer_;
+
         kernel_system *kern();
 
         // Both need the kernel lock and lock_ held.
@@ -173,6 +210,9 @@ namespace eka2l1::enhance {
         void run_draw(profile_hook &hook, std::uint16_t index, eval_context &ctx);
         frame &building(kernel::process *pr);
         void publish();
+        void forget_frames();
+        layer &the_layer();
+        std::shared_ptr<frame> parse_frame(const control::json &body);
 
         void load_profile(const control::json &profile);
         void clear_profile();

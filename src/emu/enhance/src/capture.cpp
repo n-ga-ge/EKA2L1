@@ -1,8 +1,10 @@
 // Copyright (c) 2026 EKA2L1 Team.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "engine.h"
+#include "layer.h"
 
 #include <common/algorithm.h>
+#include <common/crypt.h>
 #include <common/cvt.h>
 #include <common/log.h>
 #include <cpu/arm_interface.h>
@@ -11,6 +13,8 @@
 #include <kernel/process.h>
 #include <kernel/thread.h>
 #include <system/epoc.h>
+
+#include <xxhash.h>
 
 #include <algorithm>
 #include <cmath>
@@ -79,6 +83,22 @@ namespace eka2l1::enhance {
     void engine::set_sink(sink *target) {
         const std::lock_guard<std::mutex> guard(lock_);
         sink_ = target;
+    }
+
+    void engine::forget_frames() {
+        current_.reset();
+        last_.reset();
+
+        if (sink_) {
+            sink_->frame_complete(nullptr);
+        }
+    }
+
+    void engine::complete_at_present() {
+        const std::lock_guard<std::mutex> guard(lock_);
+        if (current_ && !current_->draws.empty()) {
+            publish();
+        }
     }
 
     void engine::set_replace(const bool replace) {
@@ -175,10 +195,17 @@ namespace eka2l1::enhance {
                 }
             });
 
-            k->register_process_exit_callback([this](kernel::process *) {
+            k->register_process_exit_callback([this](kernel::process *ended) {
                 const std::lock_guard<std::mutex> guard(lock_);
                 if (!debug_hooks_.empty() || !profile_hooks_.empty()) {
                     resolve();
+                }
+
+                // Its frames name memory that is gone.
+                const std::uint32_t uid = ended ? ended->get_uid() : 0;
+                if ((current_ && current_->process_uid == uid) || (last_ && !last_->injected && last_->process_uid == uid)) {
+                    forget_frames();
+                    has_target_ = false;
                 }
             });
         }
@@ -315,6 +342,9 @@ namespace eka2l1::enhance {
             current_->process_uid = pr ? pr->get_uid() : 0;
             current_->width = viewport_width_;
             current_->height = viewport_height_;
+            current_->has_target = has_target_;
+            current_->target = target_;
+            filled_ = 0;
         }
 
         return *current_;
@@ -363,6 +393,9 @@ namespace eka2l1::enhance {
                 if (ctx.fault) {
                     hook.faults++;
                 }
+
+                has_target_ = f.has_target;
+                target_ = f.target;
             }
             break;
         }
@@ -394,12 +427,28 @@ namespace eka2l1::enhance {
             break;
         }
 
-        if (hook.skip && replace_) {
+        // Skipping makes sense only while something shows the triangles the
+        // guest no longer draws: not when the layer is on but cannot draw.
+        const bool layered = layer_ && layer_->enabled();
+        if (hook.skip && replace_ && !(layered && layer_->failed())) {
             skip = true;
             if (!hook.ret.empty()) {
                 ctx.fault = false;
                 ret = to_u32(hook.ret.eval(ctx));
                 has_ret = true;
+            }
+
+            // The guest will not draw what was captured since the last hook
+            // that skipped (this hook's own triangles, or those of a draw hook
+            // further up when the function skipped is the one that fills
+            // them). Mark where they belong in its picture, so that what it
+            // draws around and over them can be told from them.
+            if (current_ && layered) {
+                frame &f = *current_;
+                if (f.has_target && f.vertices.size() > filled_) {
+                    key_pixels_ += fill_key(pr, f.target, f.vertices.data() + filled_, f.vertices.size() - filled_);
+                }
+                filled_ = f.vertices.size();
             }
         }
     }
@@ -555,6 +604,10 @@ namespace eka2l1::enhance {
         }
     }
 
+    std::uint32_t pixel_size(const texture_format format) {
+        return bytes_per_pixel(format);
+    }
+
     // To 0xAABBGGRR, which is R, G, B, A in memory.
     static std::uint32_t to_rgba(const texture_format format, const std::uint32_t raw) {
         std::uint32_t r = 0, g = 0, b = 0, a = 255;
@@ -613,17 +666,9 @@ namespace eka2l1::enhance {
         return raw;
     }
 
-    bool engine::decode(const std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba) {
-        const std::uint32_t size = bytes_per_pixel(texture.format);
-        if (!size || !texture.pixels || !texture.width || !texture.height
-            || texture.width > MAX_TEXTURE_SIDE || texture.height > MAX_TEXTURE_SIDE) {
-            return false;
-        }
-
-        kernel_lock guard(kern());
-
+    static kernel::process *running_process(kernel_system *k, const std::uint32_t process_uid) {
         kernel::process *pr = nullptr;
-        for (auto &object : kern()->get_process_list()) {
+        for (auto &object : k->get_process_list()) {
             auto *candidate = reinterpret_cast<kernel::process *>(object.get());
             if (candidate && candidate->get_uid() == process_uid
                 && candidate->get_exit_type() == kernel::entity_exit_type::pending) {
@@ -631,6 +676,72 @@ namespace eka2l1::enhance {
             }
         }
 
+        return pr;
+    }
+
+    static bool usable(const texture_ref &texture) {
+        return bytes_per_pixel(texture.format) && texture.pixels && texture.width && texture.height
+            && texture.width <= MAX_TEXTURE_SIDE && texture.height <= MAX_TEXTURE_SIDE;
+    }
+
+    bool engine::hash_locked(const std::uint32_t process_uid, const texture_ref &texture, std::uint64_t &hash) {
+        kernel::process *pr = usable(texture) ? running_process(kern(), process_uid) : nullptr;
+        if (!pr) {
+            return false;
+        }
+
+        const std::uint32_t size = bytes_per_pixel(texture.format);
+        const std::uint32_t pitch = texture.pitch ? texture.pitch : texture.width * size;
+        const std::uint32_t row = texture.width * size;
+
+        XXH64_state_t *state = XXH64_createState();
+        XXH64_reset(state, 0);
+
+        bool mapped = true;
+        auto feed = [&](std::uint32_t addr, std::uint32_t length) {
+            while (length && mapped) {
+                const std::uint32_t chunk = std::min<std::uint32_t>(length, 0x1000 - (addr & 0xFFF));
+                const void *from = pr->get_ptr_on_addr_space(addr);
+                if (!from) {
+                    mapped = false;
+                    break;
+                }
+
+                XXH64_update(state, from, chunk);
+                addr += chunk;
+                length -= chunk;
+            }
+        };
+
+        if (pitch == row) {
+            feed(texture.pixels, row * texture.height);
+        } else {
+            for (std::uint32_t y = 0; y < texture.height && mapped; y++) {
+                feed(texture.pixels + y * pitch, row);
+            }
+        }
+
+        if (texture.format == FORMAT_P8 && texture.palette) {
+            feed(texture.palette, 256 * bytes_per_pixel(texture.palette_format));
+        }
+
+        hash = XXH64_digest(state);
+        XXH64_freeState(state);
+        return mapped;
+    }
+
+    bool engine::decode(const std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba) {
+        kernel_lock guard(kern());
+        return decode_locked(process_uid, texture, rgba);
+    }
+
+    bool engine::decode_locked(const std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba) {
+        const std::uint32_t size = bytes_per_pixel(texture.format);
+        if (!usable(texture)) {
+            return false;
+        }
+
+        kernel::process *pr = running_process(kern(), process_uid);
         if (!pr) {
             return false;
         }
@@ -740,9 +851,10 @@ namespace eka2l1::enhance {
         has_begin_ = has_end_ = false;
         viewport_width_ = 176;
         viewport_height_ = 208;
-        current_.reset();
-        last_.reset();
+        forget_frames();
+        has_target_ = false;
         dropped_draws_ = 0;
+        key_pixels_ = 0;
     }
 
     void engine::load_profile(const json &profile) {
@@ -897,6 +1009,155 @@ namespace eka2l1::enhance {
             viewport_width_ = std::clamp<std::uint32_t>(number_of(viewport["width"], "viewport.width"), 1, MAX_TEXTURE_SIDE);
             viewport_height_ = std::clamp<std::uint32_t>(number_of(viewport["height"], "viewport.height"), 1, MAX_TEXTURE_SIDE);
         }
+    }
+
+    // Base64 to 0xAABBGGRR words (R, G, B, A bytes), which must be exactly `pixels` of them.
+    static std::vector<std::uint32_t> pixels_of(const json &value, const std::size_t pixels, const std::string &where) {
+        const std::size_t bytes = pixels * 4;
+        const std::string text = value.is_string() ? value.string() : std::string();
+        if (text.size() != (bytes + 2) / 3 * 4) {
+            throw api_error(400, "bad_frame", where + ": `data` must be base64 of width times height times four bytes (R, G, B, A)");
+        }
+
+        std::vector<std::uint32_t> words(pixels);
+        const std::size_t decoded = crypt::base64_decode(reinterpret_cast<const std::uint8_t *>(text.data()), text.size(),
+            reinterpret_cast<char *>(words.data()), bytes);
+        if (decoded != bytes) {
+            throw api_error(400, "bad_frame", where + ": `data` is not base64");
+        }
+
+        return words;
+    }
+
+    static std::uint32_t side_of(const json &value, const std::string &where) {
+        const std::uint32_t side = number_of(value, where);
+        if (!side || side > MAX_TEXTURE_SIDE) {
+            throw api_error(400, "bad_frame", where + " must be between 1 and " + std::to_string(MAX_TEXTURE_SIDE));
+        }
+        return side;
+    }
+
+    std::shared_ptr<frame> engine::parse_frame(const json &body) {
+        static const std::pair<const char *, blend_mode> blends[] = {
+            { "none", BLEND_NONE }, { "alpha", BLEND_ALPHA }, { "add", BLEND_ADD },
+            { "multiply", BLEND_MULTIPLY }, { "key", BLEND_KEY }
+        };
+        static const std::pair<const char *, depth_mode> depths[] = {
+            { "none", DEPTH_NONE }, { "less", DEPTH_LESS }, { "lequal", DEPTH_LEQUAL },
+            { "greater", DEPTH_GREATER }, { "gequal", DEPTH_GEQUAL }
+        };
+
+        auto made = std::make_shared<frame>();
+        frame &f = *made;
+        f.injected = true;
+        f.width = body["width"].is_null() ? 176 : side_of(body["width"], "`width`");
+        f.height = body["height"].is_null() ? 208 : side_of(body["height"], "`height`");
+        f.process_uid = body["process"].is_null() ? 0 : number_of(body["process"], "`process`");
+
+        if (!body["vertices"].is_array() || body["vertices"].items().size() % 7
+            || body["vertices"].items().size() / 7 > MAX_FRAME_VERTICES) {
+            throw api_error(400, "bad_frame", "`vertices` must be an array of seven numbers a vertex: x, y, z, w, u, v, colour");
+        }
+
+        const json::array &numbers = body["vertices"].items();
+        f.vertices.resize(numbers.size() / 7);
+        for (std::size_t n = 0; n < f.vertices.size(); n++) {
+            const json *at = numbers.data() + n * 7;
+            for (int k = 0; k < 7; k++) {
+                if (!at[k].is_number() || !std::isfinite(at[k].number())) {
+                    throw api_error(400, "bad_frame", "`vertices` must hold finite numbers only");
+                }
+            }
+
+            vertex &v = f.vertices[n];
+            v.x = static_cast<float>(at[0].number());
+            v.y = static_cast<float>(at[1].number());
+            v.z = static_cast<float>(at[2].number());
+            v.w = static_cast<float>(at[3].number());
+            v.u = static_cast<float>(at[4].number());
+            v.v = static_cast<float>(at[5].number());
+            v.color = to_u32(at[6].number());
+        }
+
+        if (body["textures"].is_array()) {
+            if (body["textures"].items().size() > 256) {
+                throw api_error(400, "bad_frame", "at most 256 textures");
+            }
+
+            std::size_t n = 0;
+            for (const json &entry : body["textures"].items()) {
+                const std::string where = "texture " + std::to_string(n++);
+
+                texture_ref ref;
+                ref.width = side_of(entry["width"], where + ": `width`");
+                ref.height = side_of(entry["height"], where + ": `height`");
+
+                if (!entry["data"].is_null()) {
+                    f.texture_pixels.push_back(pixels_of(entry["data"], std::size_t(ref.width) * ref.height, where));
+                    ref.format = FORMAT_ARGB8888;
+                } else {
+                    // As GET /v1/enhance/frame gives it: in guest memory.
+                    f.texture_pixels.emplace_back();
+                    ref.pixels = number_of(entry["pixels"], where + ": `pixels`");
+                    ref.id = entry["id"].is_null() ? ref.pixels : number_of(entry["id"], where + ": `id`");
+                    ref.pitch = entry["pitch"].is_null() ? 0 : number_of(entry["pitch"], where + ": `pitch`");
+                    ref.palette = entry["palette"].is_null() ? 0 : number_of(entry["palette"], where + ": `palette`");
+                    ref.format = format_of(entry["format"], "texture format", true);
+                    ref.palette_format = (entry["paletteFormat"].is_null() || entry["paletteFormat"].string() == "none")
+                        ? FORMAT_NONE : format_of(entry["paletteFormat"], "palette format", false);
+                    if (!entry["key"].is_null()) {
+                        ref.has_key = true;
+                        ref.key = number_of(entry["key"], where + ": `key`");
+                    }
+                }
+
+                f.textures.push_back(ref);
+            }
+        }
+
+        if (!body["draws"].is_array()) {
+            throw api_error(400, "bad_frame", "`draws` must be an array");
+        }
+
+        for (const json &entry : body["draws"].items()) {
+            draw d;
+            d.first_vertex = number_of(entry["first"], "draw: `first`");
+            d.vertex_count = number_of(entry["count"], "draw: `count`");
+            if (d.vertex_count % 3 || std::uint64_t(d.first_vertex) + d.vertex_count > f.vertices.size()) {
+                throw api_error(400, "bad_frame", "a draw's `count` must be a multiple of three and lie inside `vertices`");
+            }
+
+            const double texture = entry["texture"].number(-1);
+            if (texture >= 0) {
+                if (texture >= static_cast<double>(f.textures.size())) {
+                    throw api_error(400, "bad_frame", "a draw names a texture the frame does not have");
+                }
+                d.texture = static_cast<std::int32_t>(texture);
+            }
+
+            const std::string blend = entry["blend"].string("none");
+            const auto blend_found = std::find_if(std::begin(blends), std::end(blends),
+                [&](const auto &pair) { return blend == pair.first; });
+            const std::string depth = entry["depth"].string("none");
+            const auto depth_found = std::find_if(std::begin(depths), std::end(depths),
+                [&](const auto &pair) { return depth == pair.first; });
+            if (blend_found == std::end(blends) || depth_found == std::end(depths)) {
+                throw api_error(400, "bad_frame", "a draw has an unknown `blend` or `depth`");
+            }
+
+            d.blend = blend_found->second;
+            d.depth = depth_found->second;
+            f.draws.push_back(d);
+        }
+
+        const json &screen = body["screen"];
+        if (screen.is_object()) {
+            f.screen_width = side_of(screen["width"], "screen: `width`");
+            f.screen_height = side_of(screen["height"], "screen: `height`");
+            f.screen_pixels = pixels_of(screen["data"], std::size_t(f.screen_width) * f.screen_height, "screen");
+        }
+
+        return made;
     }
 
     void set_sink(system *sys, sink *target) {

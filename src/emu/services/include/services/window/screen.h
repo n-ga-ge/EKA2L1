@@ -28,6 +28,7 @@
 #include <services/window/common.h>
 #include <services/window/framebuffer.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -72,6 +73,30 @@ namespace eka2l1::epoc {
     using focus_change_callback_handler = std::function<void(void *, window_group *, focus_change_property)>;
     using screen_redraw_callback_handler = std::function<void(void *, screen *, bool)>;
     using screen_mode_change_callback_handler = std::function<void(void *, screen *, const int)>;
+
+    /**
+     * Something that draws a screen's texture itself, in place of the plain
+     * copy of the picture a guest presents (src/emu/enhance draws a game's 3D
+     * into it at more than the screen's size). A screen has none by default.
+     */
+    struct screen_compositor {
+        virtual ~screen_compositor() = default;
+
+        /**
+         * The scale the screen texture should have, given the one the screen
+         * would choose itself.
+         */
+        virtual float screen_scale(screen *scr, const float usual) = 0;
+
+        /**
+         * Called with the kernel locked, after the picture the guest presented
+         * was uploaded to `dsa_texture` and copied to the screen texture.
+         *
+         * \returns True when it drew the screen texture, which then stays at
+         *          the scale this compositor asks for.
+         */
+        virtual bool compose(screen *scr, drivers::graphics_driver *driver, kernel_system *kern) = 0;
+    };
 
     struct screen {
         int number;
@@ -135,6 +160,10 @@ namespace eka2l1::epoc {
         std::int32_t active_dsa_count_ = 0;
 
         bool sync_screen_buffer = false;
+
+        // Null, or what draws the screen texture when the guest presents. Set
+        // from another thread than the one that presents.
+        std::atomic<screen_compositor *> compositor{ nullptr };
 
         bool direct_framebuffer_mapped = false;
         framebuffer_observer direct_framebuffer;

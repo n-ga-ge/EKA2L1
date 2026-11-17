@@ -1,6 +1,7 @@
 // Copyright (c) 2026 EKA2L1 Team.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "engine.h"
+#include "layer.h"
 
 #include <common/algorithm.h>
 #include <common/cvt.h>
@@ -257,9 +258,21 @@ namespace eka2l1::enhance {
             active = active || !hook.addresses.empty();
         }
 
+        // The factor the layer draws at: a whole number unless it follows the
+        // frontend's own scale.
+        const double scale = layer_ ? static_cast<double>(layer_->scale_in_use()) : 0.0;
+        const json scale_json = (scale == std::floor(scale)) ? json(static_cast<std::int64_t>(scale)) : json(scale);
+
         return { { "available", !profile_hooks_.empty() },
             { "engine", profile_hooks_.empty() ? json(nullptr) : json(profile_name_) },
             { "active", active }, { "replace", replace_ },
+            { "scale", scale_json }, { "auto", layer_ && layer_->automatic() },
+            { "filter", (layer_ && layer_->linear()) ? "linear" : "nearest" },
+            { "composed", static_cast<std::int64_t>(layer_ ? layer_->composed() : 0) },
+            { "cachedTextures", static_cast<std::int64_t>(layer_ ? layer_->cached_textures() : 0) },
+            { "textureUploads", static_cast<std::int64_t>(layer_ ? layer_->uploads() : 0) },
+            { "keyPixels", static_cast<std::int64_t>(key_pixels_) },
+            { "layerFailed", layer_ && layer_->failed() },
             { "frames", static_cast<std::int64_t>(frame_counter_) },
             { "triangles", static_cast<std::int64_t>(last_ ? last_->vertices.size() / 3 : 0) },
             { "textures", static_cast<std::int64_t>(last_ ? last_->textures.size() : 0) },
@@ -492,14 +505,89 @@ namespace eka2l1::enhance {
 
         if (!debug && p.size() == 2 && method == "PATCH") {
             const json body = req.data();
-            const std::lock_guard<std::mutex> hooks(lock_);
-            if (!body["replace"].is_null()) {
-                if (!body["replace"].is_boolean()) {
-                    throw api_error(400, "bad_request", "`replace` must be boolean");
-                }
-                replace_ = body["replace"].boolean();
+
+            if (!body["replace"].is_null() && !body["replace"].is_boolean()) {
+                throw api_error(400, "bad_request", "`replace` must be boolean");
             }
+
+            const json &wanted = body["scale"];
+            bool automatic = false;
+            std::uint32_t scale = 0;
+            if (wanted.is_string() && wanted.string() == "auto") {
+                automatic = true;
+            } else if (wanted.is_number() && wanted.number() >= 0 && wanted.number() <= 8 && wanted.number() == std::floor(wanted.number())) {
+                scale = static_cast<std::uint32_t>(wanted.number());
+            } else if (!wanted.is_null()) {
+                throw api_error(400, "bad_request", "`scale` must be a whole number from 0 to 8, or \"auto\"");
+            }
+
+            const std::string filter = body["filter"].string();
+            if (!body["filter"].is_null() && filter != "nearest" && filter != "linear") {
+                throw api_error(400, "bad_request", "`filter` must be \"nearest\" or \"linear\"");
+            }
+
+            kernel_lock guard(kern());
+
+            layer *drawing = nullptr;
+            {
+                const std::lock_guard<std::mutex> hooks(lock_);
+                if (!wanted.is_null()) {
+                    // The layer shows what the guest no longer draws itself.
+                    replace_ = automatic || scale != 0;
+                }
+                if (!body["replace"].is_null()) {
+                    replace_ = body["replace"].boolean();
+                }
+                if (!wanted.is_null() || !body["filter"].is_null()) {
+                    drawing = &the_layer();
+                }
+            }
+
+            // Not under the lock above: the layer takes its own, and a present
+            // on the guest's thread takes them in the other order.
+            if (drawing && !body["filter"].is_null()) {
+                drawing->set_linear(filter == "linear");
+            }
+            if (drawing && !wanted.is_null()) {
+                drawing->configure(scale, automatic);
+            }
+
+            const std::lock_guard<std::mutex> hooks(lock_);
             return response::from_json(status());
+        }
+
+        if (!debug && what == "test-frame" && (method == "POST" || method == "DELETE")) {
+            std::shared_ptr<frame> injected = (method == "POST") ? parse_frame(req.data()) : nullptr;
+
+            kernel_lock guard(kern());
+
+            layer *drawing = nullptr;
+            {
+                const std::lock_guard<std::mutex> hooks(lock_);
+                if (!injected) {
+                    // Only the injected frame goes; one being captured stays.
+                    if (last_ && last_->injected) {
+                        last_.reset();
+                        if (sink_) {
+                            sink_->frame_complete(nullptr);
+                        }
+                    }
+                    return response::from_json(status());
+                }
+
+                drawing = &the_layer();
+                if (!drawing->enabled()) {
+                    throw api_error(409, "layer_off", "the layer is off; switch it on first with PATCH /v1/enhance { \"scale\": 4 }");
+                }
+
+                injected->number = ++frame_counter_;
+                last_ = injected;
+            }
+
+            drawing->inject(injected);
+
+            const std::lock_guard<std::mutex> hooks(lock_);
+            return response::from_json(status(), 201);
         }
 
         if (!debug && what == "profile" && (method == "PUT" || method == "DELETE")) {
