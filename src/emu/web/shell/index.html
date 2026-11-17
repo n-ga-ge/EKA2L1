@@ -14,6 +14,7 @@
   <header id="bar">
     <div id="status" role="status" aria-live="polite">Loading…</div>
     <div id="actions">
+      <button id="net-chip" type="button" hidden></button>
       <button id="btn-pause" type="button" disabled>Pause</button>
       <button id="btn-menu" type="button">Menu</button>
     </div>
@@ -75,6 +76,7 @@
       <button type="button" id="m-controls">Controls…</button>
       <button type="button" id="m-display">Display…</button>
       <button type="button" id="m-saves" disabled>Saves…</button>
+      <button type="button" id="m-multiplayer" disabled>Multiplayer…</button>
       <button type="button" id="m-load">Load a game…</button>
       <button type="button" id="m-link" disabled>Copy link to this game</button>
       <button type="button" id="m-guide">Guide</button>
@@ -132,6 +134,57 @@
       <button type="button" id="saves-export">Export (.zip)</button>
       <button type="button" id="saves-import">Import (.zip)…</button>
       <button type="submit">Close</button>
+    </form>
+  </dialog>
+
+  <dialog id="multiplayer">
+    <h2>Multiplayer</h2>
+    <p class="notice" id="mp-notice" role="status"></p>
+
+    <div id="mp-lobby">
+      <label class="row">Your name
+        <input id="mp-name" type="text" maxlength="24" autocomplete="nickname" spellcheck="false">
+      </label>
+      <p class="hint">The other players see this name, here and in their game.</p>
+
+      <h3>Host</h3>
+      <p class="hint">Makes a room for this game, with a code and a link to give to the others.</p>
+      <button type="button" id="mp-host" class="primary">Host a room</button>
+
+      <h3>Join</h3>
+      <div class="line">
+        <input id="mp-code" type="text" maxlength="12" placeholder="Room code" aria-label="Room code" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <button type="button" id="mp-join">Join</button>
+      </div>
+
+      <h3>Open rooms for this game</h3>
+      <ul id="mp-rooms" class="rooms"></ul>
+      <p class="hint" id="mp-rooms-hint"></p>
+      <button type="button" id="mp-refresh">Refresh</button>
+    </div>
+
+    <div id="mp-room" hidden>
+      <p class="room-head"><span>Room <b id="mp-room-code"></b></span><span id="mp-state"></span></p>
+      <div class="line" id="mp-invite">
+        <input id="mp-link" type="text" readonly aria-label="Invite link">
+        <button type="button" id="mp-copy">Copy link</button>
+      </div>
+      <p class="hint" id="mp-invite-hint"></p>
+      <label class="check" id="mp-public-row"><input id="mp-public" type="checkbox"> List this room publicly</label>
+      <p class="hint" id="mp-public-hint"></p>
+      <h3 id="mp-players-title">Players</h3>
+      <ul id="mp-players"></ul>
+    </div>
+
+    <div id="mp-next">
+      <h3>What to do next</h3>
+      <p class="hint" id="mp-next-hint"></p>
+      <p class="hint" id="mp-game-hint"></p>
+    </div>
+    <form method="dialog">
+      <button type="button" id="mp-leave" hidden>Leave room</button>
+      <!-- Takes the focus when the dialog opens; the name field would bring up a phone's keyboard. -->
+      <button type="submit" autofocus>Close</button>
     </form>
   </dialog>
 

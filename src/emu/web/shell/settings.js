@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Page settings, kept in localStorage: display options, control bindings the
-// user changed, and the last URLs loaded. Everything degrades to defaults when
+// user changed, the last URLs loaded and the multiplayer name. Everything degrades to defaults when
 // storage is unavailable (private windows).
 
 const STORAGE_KEY = 'eka2l1.settings.v1';
@@ -24,6 +24,8 @@ const DEFAULTS = {
   // the profile's tables, written the first time the user edits a binding.
   bindings: {},
   urls: { fw: '', game: '' },
+  // The name the other players of a multiplayer room see.
+  multiplayer: { name: 'Player' },
 };
 
 function load() {
@@ -34,6 +36,7 @@ function load() {
       ...stored,
       display: { ...DEFAULTS.display, ...(stored.display || {}) },
       urls: { ...DEFAULTS.urls, ...(stored.urls || {}) },
+      multiplayer: { ...DEFAULTS.multiplayer, ...(stored.multiplayer || {}) },
       bindings: stored.bindings || {},
     };
   } catch {

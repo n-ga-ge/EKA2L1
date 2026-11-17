@@ -23,6 +23,8 @@
 //   ?cache=<MB>   size bound of the download cache (see loader.js)
 //   ?touch=1|0    force the on-screen controls on or off
 //   ?fps=1        show frames per second in the status line
+//   ?room=<code>  join that multiplayer room once the game is running (see
+//                 net.js); an invite link is the game's link with this added
 //
 // Firmware and game are fetched with CORS, so their server must allow this
 // origin. loader.js fetches and keeps them; this file installs them.
@@ -32,6 +34,7 @@ import { Eka2l1 } from './eka2l1-client.js';
 import { NGAGE_KEYS, STANDARD_PROFILE, keyName, padName } from './games.js';
 import { Input } from './input.js';
 import { Downloads, LoadError, beginLoad, fileSource, wantedFromParams } from './loader.js';
+import { MAX_PLAYERS, NAME_LENGTH, RelayTransport, Session, cleanCode, cleanGame, cleanName, errorText, gameFromUid, publicRooms, relayBase, relayHealthy } from './net.js';
 import { autoProfile, gameProfiles, lookUpGame, lookUpProfile, profileById, siteLinks, switchBindings } from './profiles.js';
 import { downloadBlob, exportFileName, exportSaves, importSaves, listSaves } from './saves.js';
 import { saveSettings, settings } from './settings.js';
@@ -48,6 +51,7 @@ const canvas = $('canvas');
 const page = {
   emu: null,
   input: null,
+  net: null, // the multiplayer Session (net.js), once the emulator is up
   support: null,
   site: null, // config.json, when the host provides one
   downloads: null, // promise of the download cache (loader.js)
@@ -180,6 +184,8 @@ async function launch(app) {
   applyDisplay();
   setStatus(app.name);
   refreshControls();
+  // After a restart in a multiplayer room: the link comes up again.
+  if (page.net) page.net.release();
 }
 
 // Puts a card dump in the slot and starts the game on it. `expected` is what
@@ -247,6 +253,7 @@ async function finishLoad(load) {
   overlay.textContent = page.support.mobile ? 'Tap for sound' : 'Click or press a key for sound';
   overlay.hidden = Boolean(page.emu.audio);
   refreshControls();
+  joinFromAddress();
 }
 
 // Loads firmware (if none is installed yet) and a game from URLs, then starts it.
@@ -316,7 +323,7 @@ function wireSetup() {
     const link = shareLink();
     if (link) {
       const next = new URL(link);
-      for (const key of ['log', 'persist', 'touch', 'fps']) {
+      for (const key of ['log', 'persist', 'touch', 'fps', 'room']) {
         if (params.has(key)) next.searchParams.set(key, params.get(key));
       }
       history.replaceState(null, '', next);
@@ -344,6 +351,7 @@ function wireSetup() {
       await installAndLaunch(fileSource(gameFile), gameFile.name);
       page.source = null;
       refreshControls();
+      joinFromAddress();
     })();
   });
 }
@@ -778,6 +786,287 @@ function renderGuide() {
       <li><span></span><span><b>Fill the screen</b> (beta) uses the space a wide screen leaves beside the upright picture: stretch the picture over it, or keep its shape and fill the space with a soft, blurred copy of it. The game draws the same picture either way; no more of its world is shown.</span></li>
       <li><span></span><span>None of these change the game's speed, which depends on your device's processor.</span></li>
     </ul>`);
+
+  const item = (...children) => el('li', null, el('span'), el('span', null, ...children));
+  const facts = game ? game.multiplayer : undefined;
+  $('guide-body').append(el('h3', null, 'Multiplayer'));
+  if (!page.net || !page.net.supported) {
+    $('guide-body').append(el('ul', null, item(errorText({ code: 'unsupported' }))));
+    return;
+  }
+  $('guide-body').append(
+    el('ul', null,
+      item('Games that host and join over Bluetooth can be played with people elsewhere. ', el('b', null, 'Menu → Multiplayer'), ' puts you in a room of up to ', String(MAX_PLAYERS), ' players: host one and send the others its link or its six-character code, or join one with a code or from the list of open rooms.'),
+      item('Then use the game\'s own multiplayer menu, as you would over Bluetooth: one player hosts a game there and the others join it.',
+        facts && facts.bluetooth && facts.menu ? ` In this game: ${facts.menu}.` : ''),
+      item('Everyone has to run the same game. The room\'s code and the number of players in it are shown beside the Pause button while you are in one.'),
+      item('While someone else is in the room, keep this tab in view. Their games wait for yours: the page does not pause it when the tab is hidden, but a browser stops drawing a tab it does not show, and the game may stand still until you come back.')));
+}
+
+// --- multiplayer -------------------------------------------------------------------
+
+// What the dialog knows besides the session: whether the relay answers (null
+// while that is not known), the open public rooms for this game (null when
+// they could not be read) and a message about what was typed.
+const lobby = { relay: null, rooms: null, notice: '', probe: 0, told: null };
+// The room named in the address, until it has been joined once.
+let addressRoom = params.get('room');
+
+// The names the relay may know the running game by, the one it is hosted
+// under first: the slug it was started by, its catalogue slug, and one made
+// from its app UID, which is all there is for a game the catalogue does not
+// have.
+function roomGames() {
+  if (!page.app) return [];
+  const game = runningGame();
+  return [page.source && cleanGame(page.source.slug), game && game.slug, gameFromUid(page.app.uid)].filter(Boolean);
+}
+
+// What the catalogue says about the running game has usually arrived long
+// before anyone opens the dialog; a room must not be named before it has.
+async function roomGame() {
+  if (page.app) await lookUpGame(page.app.uid, new URLSearchParams(location.search).get('g')).catch(() => null);
+  return roomGames()[0] || '';
+}
+
+// The link that starts this game and joins the room, or null for a game that
+// was loaded from files.
+function inviteLink(room) {
+  const link = shareLink();
+  if (!link) return null;
+  const url = new URL(link);
+  url.searchParams.set('room', room);
+  return url.href;
+}
+
+function forgetAddressRoom() {
+  params.delete('room');
+  const url = new URL(location.href);
+  if (!url.searchParams.has('room')) return;
+  url.searchParams.delete('room');
+  history.replaceState(null, '', url);
+}
+
+// Asks the relay whether it is there and which rooms are open.
+async function probeRelay() {
+  const probe = ++lobby.probe;
+  lobby.relay = null;
+  lobby.rooms = null;
+  renderMultiplayer();
+  const base = await relayBase();
+  const healthy = await relayHealthy(base);
+  const game = await roomGame();
+  const rooms = healthy && game ? await publicRooms(base, game) : null;
+  if (probe !== lobby.probe) return;
+  lobby.relay = healthy;
+  lobby.rooms = rooms;
+  if ($('multiplayer').open) renderMultiplayer();
+}
+
+function openMultiplayer() {
+  lobby.notice = '';
+  renderMultiplayer();
+  if (!$('multiplayer').open) $('multiplayer').showModal();
+  if (page.net.supported && !page.net.active) probeRelay().catch(reportError);
+}
+
+async function hostRoom() {
+  const name = cleanName(settings.multiplayer.name);
+  const game = await roomGame();
+  if (!name) lobby.notice = `Enter your name first: 1 to ${NAME_LENGTH} characters.`;
+  else if (!game) lobby.notice = 'This game has no name the multiplayer service takes, so it cannot be hosted.';
+  else lobby.notice = '';
+  if (lobby.notice) {
+    renderMultiplayer();
+    return;
+  }
+  page.net.host({ game, name });
+}
+
+function joinRoom(text) {
+  const name = cleanName(settings.multiplayer.name);
+  const room = cleanCode(text);
+  if (!name) lobby.notice = `Enter your name first: 1 to ${NAME_LENGTH} characters.`;
+  else if (!room) lobby.notice = 'A room code is six letters and digits, like K7M2QX.';
+  else lobby.notice = '';
+  if (lobby.notice) {
+    renderMultiplayer();
+    return;
+  }
+  page.net.join({ room, name });
+}
+
+// Joins the room the address names, once, when a game has started.
+function joinFromAddress() {
+  const text = addressRoom;
+  addressRoom = null;
+  if (!text || !page.app || !page.net || page.net.active) return;
+  const room = cleanCode(text);
+  if (!room || !page.net.supported) {
+    forgetAddressRoom();
+    openMultiplayer();
+    if (!room) lobby.notice = 'The link names a room, but not with a code this page knows. Ask for the six-character code.';
+    renderMultiplayer();
+    return;
+  }
+  page.net.join({ room, name: cleanName(settings.multiplayer.name) || 'Player' });
+}
+
+function leaveRoom() {
+  page.net.leave();
+  // The lobby is shown again: see what is open now.
+  if ($('multiplayer').open) probeRelay().catch(reportError);
+}
+
+// The room beside the Pause button: its code and how many players are in it.
+function renderNetChip() {
+  const net = page.net;
+  const chip = $('net-chip');
+  chip.hidden = !net.active;
+  if (chip.hidden) return;
+  const count = net.players;
+  const [short, long, label] = net.state === 'open' ? [String(count), `${count} player${count === 1 ? '' : 's'}`, `${count} player${count === 1 ? '' : 's'}`]
+    : net.state === 'retrying' ? ['…', 'reconnecting…', 'connection lost, trying again'] : ['…', 'connecting…', 'connecting'];
+  chip.classList.toggle('warn', net.state === 'retrying');
+  chip.replaceChildren(`${net.room} · `, el('span', { class: 'narrow' }, short), el('span', { class: 'wide' }, long));
+  chip.title = `Multiplayer room ${net.room}: ${label}`;
+  chip.setAttribute('aria-label', chip.title);
+}
+
+function renderMultiplayer() {
+  const net = page.net;
+  const usable = net.supported;
+  const inRoom = net.active;
+  const game = runningGame();
+
+  let notice = '';
+  let tone = '';
+  if (!usable) [notice, tone] = [errorText({ code: 'unsupported' }), 'warn'];
+  else if (net.state === 'connecting') notice = `Connecting to room ${net.room}…`;
+  else if (net.state === 'retrying') [notice, tone] = ['The connection to the room was lost. Trying again…', 'warn'];
+  else if (net.state === 'open' && !net.created && net.game && roomGames().length && !roomGames().includes(net.game)) {
+    [notice, tone] = [`This room was made for another game (${net.game}). Everyone has to run the same game.`, 'warn'];
+  } else if (lobby.notice) [notice, tone] = [lobby.notice, 'bad'];
+  else if (net.error) [notice, tone] = [errorText(net.error), 'bad'];
+  else if (!inRoom && lobby.relay === false) [notice, tone] = [errorText({ code: 'unreachable' }), 'bad'];
+  $('mp-notice').textContent = notice;
+  $('mp-notice').className = `notice ${tone}`.trim();
+
+  $('mp-lobby').hidden = !usable || inRoom;
+  $('mp-room').hidden = !usable || !inRoom;
+  $('mp-next').hidden = !usable;
+  $('mp-leave').hidden = !inRoom;
+
+  if (usable && !inRoom) {
+    // Not while it is being typed in.
+    if (document.activeElement !== $('mp-name')) $('mp-name').value = cleanName(settings.multiplayer.name);
+    const rooms = lobby.rooms || [];
+    $('mp-rooms').replaceChildren(...rooms.map((room) => el('li', null,
+      el('span', null, room.host, el('small', null, ` · ${room.room} · ${room.players} of ${room.max} players`)),
+      el('button', { type: 'button', data: { room: room.room } }, 'Join'))));
+    $('mp-rooms-hint').textContent = lobby.relay === null ? 'Looking for open rooms…'
+      : lobby.relay === false ? ''
+        : !lobby.rooms ? 'The list of open rooms could not be read.'
+          : rooms.length ? '' : 'No open rooms for this game right now. Host one and tick “List this room publicly” to show it here.';
+  }
+
+  if (usable && inRoom) {
+    $('mp-room-code').textContent = net.room;
+    $('mp-state').textContent = { connecting: 'Connecting…', open: 'Connected', retrying: 'Reconnecting…' }[net.state];
+    $('mp-state').className = net.state === 'open' ? 'ok' : 'warn';
+
+    const link = inviteLink(net.room);
+    $('mp-invite').hidden = !link;
+    $('mp-link').value = link || '';
+    $('mp-invite-hint').textContent = link
+      ? 'Whoever opens this link starts the game and joins the room. The code alone works too, under Menu → Multiplayer.'
+      : 'This game was loaded from files, so there is no link to it. Give the others the code: they load the same game and enter it under Menu → Multiplayer.';
+
+    $('mp-public-row').hidden = !net.owner;
+    $('mp-public').checked = net.public;
+    $('mp-public-hint').textContent = net.owner ? 'A listed room is shown on this site, under your name, for anyone to join.'
+      : net.public && net.state === 'open' ? 'This room is listed publicly: anyone can join it.' : '';
+
+    const players = net.state === 'open' ? [[net.id, net.name, true], ...[...net.peers].map(([id, name]) => [id, name, false])].sort((a, b) => a[0] - b[0]) : [];
+    $('mp-players-title').textContent = players.length ? `Players · ${players.length} of ${net.max}` : 'Players';
+    $('mp-players').replaceChildren(
+      ...players.map(([, name, self]) => el('li', null, el('span', { class: 'ok' }, '●'), el('span', null, name || 'Player', self ? ' (you)' : ''))),
+      ...(players.length === 1 ? [el('li', null, el('span'), el('span', { class: 'hint' }, 'Nobody else is here yet.'))] : []),
+      ...(players.length ? [] : [el('li', null, el('span'), el('span', { class: 'hint' }, 'Not connected.'))]));
+  }
+
+  const facts = game ? game.multiplayer : undefined;
+  $('mp-next-hint').textContent = 'When everyone is in the room, use the game\'s own multiplayer menu, as you would over Bluetooth: one player hosts a game there and the others join it.'
+    + (facts && facts.bluetooth && facts.menu ? ` In this game: ${facts.menu}.` : '');
+  $('mp-game-hint').textContent = facts === null || (facts && !facts.bluetooth)
+    ? 'The catalogue lists no Bluetooth multiplayer for this game, so its menus may have nothing to host or join.'
+    : facts ? [facts.status, facts.note].filter(Boolean).join(' ') : '';
+}
+
+// The session changed: the room, its players or the state of the connection.
+function netChanged() {
+  const net = page.net;
+  renderNetChip();
+  if ($('multiplayer').open) renderMultiplayer();
+  followVisibility();
+
+  // The address names a room only while this player is in it, so that a
+  // reload goes back there and nowhere else. It stays after a connection
+  // that failed, since a reload is then the way to try again.
+  const named = cleanCode(new URLSearchParams(location.search).get('room'));
+  const retryable = Boolean(net.error) && ['unreachable', 'lost'].includes(net.error.code);
+  if (named && (net.active ? net.room !== named : !retryable)) forgetAddressRoom();
+
+  if (!net.active && net.error && net.error !== lobby.told) {
+    // A room that ended by itself is news: say why, unless another dialog is
+    // in the way; then it is said when this one is next opened.
+    lobby.told = net.error;
+    if ($('multiplayer').open) probeRelay().catch(reportError);
+    else if (!document.querySelector('dialog[open]')) openMultiplayer();
+  }
+}
+
+function wireMultiplayerDialog() {
+  page.net.onChange = netChanged;
+  $('net-chip').addEventListener('click', openMultiplayer);
+
+  $('mp-name').addEventListener('input', () => {
+    settings.multiplayer.name = cleanName($('mp-name').value);
+    saveSettings();
+  });
+  $('mp-host').addEventListener('click', () => hostRoom().catch(reportError));
+  $('mp-join').addEventListener('click', () => joinRoom($('mp-code').value));
+  $('mp-code').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); joinRoom($('mp-code').value); }
+  });
+  $('mp-rooms').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-room]');
+    if (button) joinRoom(button.dataset.room);
+  });
+  $('mp-refresh').addEventListener('click', () => probeRelay().catch(reportError));
+  $('mp-public').addEventListener('change', () => page.net.setPublic($('mp-public').checked));
+  $('mp-leave').addEventListener('click', leaveRoom);
+
+  let copied = 0;
+  $('mp-copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('mp-link').value);
+      $('mp-copy').textContent = 'Copied';
+    } catch {
+      // No clipboard access: leave the link selected for the visitor to copy.
+      $('mp-link').select();
+      $('mp-copy').textContent = 'Select and copy';
+    }
+    clearTimeout(copied);
+    copied = setTimeout(() => { $('mp-copy').textContent = 'Copy link'; }, 2500);
+  });
+
+  // What went wrong has been read once the dialog is closed.
+  $('multiplayer').addEventListener('close', () => {
+    lobby.notice = '';
+    page.net.error = null;
+    $('mp-code').value = '';
+  });
 }
 
 // --- session controls ----------------------------------------------------------------
@@ -792,6 +1081,7 @@ function refreshControls() {
   $('m-mute').disabled = !page.emu;
   $('m-mute').textContent = page.muted ? 'Unmute' : 'Mute';
   $('m-link').disabled = !shareLink();
+  $('m-multiplayer').disabled = !running;
   showGameTitle();
 }
 
@@ -821,6 +1111,10 @@ async function restart() {
   refreshControls();
   setStatus('Restarting…');
   page.input.releaseAll();
+  // In a multiplayer room the game's connections end with it. The link stays
+  // down until the game is up again (launch), so that nothing from the other
+  // players arrives in between.
+  if (page.net) page.net.hold();
   await page.emu.call('DELETE', '/v1/session');
   await launch(app);
 }
@@ -830,11 +1124,27 @@ async function closeGame() {
   if (!page.emu || !page.app) return;
   page.input.releaseAll();
   page.emu.module._eka2l1_web_save();
+  // A room is for one game: leave it with the game.
+  if (page.net) page.net.leave();
   await page.emu.call('DELETE', '/v1/session');
   page.app = null;
   page.source = null;
   overlay.hidden = true;
   refreshControls();
+}
+
+// A hidden tab gets no animation frames, so the game cannot be shown anyway:
+// pause it, and pick up again when the tab returns. Not while other players
+// are in a multiplayer room with this one, because their games wait for this
+// one's answers and a paused emulator gives none. (How far the game gets
+// unseen is then up to the emulator, which draws on animation frames.) Called
+// again whenever the room changes, so a tab that is hidden when the last
+// other player leaves pauses then.
+function followVisibility() {
+  if (!page.emu) return;
+  const hidden = document.visibilityState === 'hidden';
+  if (hidden && !(page.net && page.net.shared)) setPaused(true, false);
+  else if (!page.userPaused) setPaused(false, false);
 }
 
 function wireControls() {
@@ -860,6 +1170,7 @@ function wireControls() {
   entry('m-controls', () => { renderControls(); $('controls').showModal(); });
   entry('m-display', () => { renderDisplay(); $('display').showModal(); });
   entry('m-saves', async () => { await renderSaves(); $('saves').showModal(); });
+  entry('m-multiplayer', openMultiplayer);
   entry('m-load', async () => { await closeGame(); await showSetup(); });
   entry('m-link', async () => {
     const link = shareLink();
@@ -900,16 +1211,10 @@ function wireControls() {
       .then(() => location.assign(target));
   });
 
-  // A hidden tab gets no animation frames, so the game cannot be shown anyway:
-  // pause it, flush saves, and pick up again when the tab returns.
   document.addEventListener('visibilitychange', () => {
     if (!page.emu) return;
-    if (document.visibilityState === 'hidden') {
-      page.emu.module._eka2l1_web_save();
-      setPaused(true, false);
-    } else if (!page.userPaused) {
-      setPaused(false, false);
-    }
+    if (document.visibilityState === 'hidden') page.emu.module._eka2l1_web_save();
+    followVisibility();
   });
   window.addEventListener('pagehide', () => { if (page.emu) page.emu.module._eka2l1_web_save(); });
 }
@@ -1030,6 +1335,8 @@ async function main() {
   wireControlsDialog();
   wireDisplayDialog();
   wireSavesDialog();
+  page.net = new Session(emu.module, async () => new RelayTransport(await relayBase()));
+  wireMultiplayerDialog();
   wireAudio();
   startFpsReadout();
   refreshControls();

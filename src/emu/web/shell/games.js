@@ -114,7 +114,7 @@ const MAX_NOTES = 24;
 // Longest text taken from an entry, in characters; anything longer is cut.
 // The site's catalogue is checked against the same numbers before it is
 // published, so in practice nothing is.
-const LIMITS = { title: 80, action: 120, source: 500, note: 600 };
+const LIMITS = { title: 80, action: 120, source: 500, note: 600, menu: 120, multiplayerNote: 400 };
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -198,15 +198,41 @@ const STATUS_WORDS = {
   ingame: { label: 'Playable', tone: 'ok', fallback: '' },
 };
 
-// What the catalogue says about a game, for the status line and the guide:
-// { title, about, status: { label, tone, note } | null }, any of them empty
-// when the entry does not say; null when it is not an entry at all.
+// How far a game's Bluetooth multiplayer gets on this site.
+const MULTIPLAYER_WORDS = {
+  untested: 'Nobody has tried this game\'s multiplayer here yet.',
+  broken: 'This game\'s multiplayer is known not to work here.',
+  connects: 'Players reach each other in this game; whether a whole match works is not known.',
+  plays: 'This game\'s multiplayer has been played here.',
+};
+
+// What an entry's "multiplayer" says: { bluetooth, menu, status, note }, where
+// `bluetooth` is whether the game hosts and joins over Bluetooth, `menu` is
+// where its own menu has that and `status` is a sentence on how far it gets.
+// null when the entry says the game has none; undefined when it says nothing.
+function multiplayerFacts(value) {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  return {
+    bluetooth: Array.isArray(value.modes) && value.modes.includes('bluetooth'),
+    menu: text(value.menu, LIMITS.menu),
+    status: typeof value.status === 'string' && Object.hasOwn(MULTIPLAYER_WORDS, value.status) ? MULTIPLAYER_WORDS[value.status] : '',
+    note: text(value.statusNote, LIMITS.multiplayerNote),
+  };
+}
+
+// What the catalogue says about a game, for the status line, the guide and
+// the multiplayer dialog: { slug, title, about, status: { label, tone, note }
+// | null, multiplayer }, any of them empty when the entry does not say; null
+// when it is not an entry at all.
 export function gameFacts(entry) {
   if (!isRecord(entry)) return null;
   const words = typeof entry.status === 'string' && Object.hasOwn(STATUS_WORDS, entry.status) ? STATUS_WORDS[entry.status] : null;
   const year = Number.isInteger(entry.year) && entry.year > 1990 && entry.year < 2100 ? String(entry.year) : '';
 
   return {
+    slug: typeof entry.slug === 'string' && /^[a-z0-9-]{1,64}$/.test(entry.slug) ? entry.slug : '',
+    multiplayer: multiplayerFacts(entry.multiplayer),
     title: text(entry.title, LIMITS.title),
     about: [text(entry.publisher, 60), year, text(entry.genre, 60)].filter(Boolean).join(' · '),
     status: words ? { label: words.label, tone: words.tone, note: text(entry.statusNote, LIMITS.note) || words.fallback } : null,
