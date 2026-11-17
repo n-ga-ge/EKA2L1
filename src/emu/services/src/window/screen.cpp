@@ -385,7 +385,12 @@ namespace eka2l1::epoc {
         drivers::command_list retrieved = builder.retrieve_command_list();
         driver->submit_command_list(retrieved);
 
-        if (((flags_ & epoc::screen::FLAG_SCREEN_UPSCALE_FACTOR_LOCK) == 0) && sync_screen_buffer) {
+        // A compositor draws over the copy above at its own scale, which the
+        // lock below would put back to one.
+        screen_compositor *const composing = compositor.load();
+        const bool composed = composing && composing->compose(this, driver, kern);
+
+        if (!composed && ((flags_ & epoc::screen::FLAG_SCREEN_UPSCALE_FACTOR_LOCK) == 0) && sync_screen_buffer) {
             // The app/game updates normally, try to avoid upscaling it
             // Sometimes UI are mixed in, and these syncs need to sync UI's data too!
             // Automatically flag and save this settings
@@ -569,7 +574,9 @@ namespace eka2l1::epoc {
         eka2l1::drivers::command_list retrieved = builder.retrieve_command_list();
         driver->submit_command_list(retrieved);
 
-        if (performed && sync_screen_buffer) {
+        // As in redraw(): a screen texture at another scale (a compositor's)
+        // cannot be read back into the guest's buffer.
+        if (performed && sync_screen_buffer && (display_scale_factor == 1.0f)) {
             sync_screen_buffer_data(driver);
         }
     }
@@ -1081,6 +1088,10 @@ namespace eka2l1::epoc {
             if (correct_display_scale_factor < 1.0f) {
                 correct_display_scale_factor = 1.0f;
             }
+        }
+
+        if (screen_compositor *const composing = compositor.load()) {
+            correct_display_scale_factor = composing->screen_scale(this, correct_display_scale_factor);
         }
 
         try_change_display_rescale(driver, correct_display_scale_factor);
