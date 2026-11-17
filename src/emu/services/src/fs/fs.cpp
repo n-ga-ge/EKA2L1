@@ -18,6 +18,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <services/fs/factory.h>
 #include <services/fs/fs.h>
 #include <services/fs/op.h>
 #include <services/fs/parser.h>
@@ -515,6 +516,8 @@ namespace eka2l1 {
             if (io->get_drive_entry(drive_c)) {
                 io->create_directories(u"C:\\Nokia\\Sounds\\Simple\\");
             }
+
+            epoc::fs::supply_factory_settings(io, sys->get_symbian_version_use());
         } else if (io_system *io = sys->get_io_system(); io->get_drive_entry(drive_c)) {
             // PathInfo::OthersPath() normally exists in the factory C: image.
             io->create_directories(u"C:\\Data\\Others\\");
