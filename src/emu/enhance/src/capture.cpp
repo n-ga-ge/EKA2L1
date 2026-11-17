@@ -30,6 +30,9 @@ namespace eka2l1::enhance {
     static constexpr std::size_t MAX_FRAME_VERTICES = 300000;
     static constexpr int MAX_DRAW_VERTICES = 4096;
     static constexpr std::uint32_t MAX_TEXTURE_SIDE = 2048;
+    static constexpr std::uint32_t MAX_PALETTE_STRIDE = 16;
+
+    static std::uint32_t bytes_per_pixel(const texture_format format);
 
     static std::uint32_t to_u32(const double value) {
         return std::isfinite(value) ? static_cast<std::uint32_t>(static_cast<std::int64_t>(value)) : 0;
@@ -535,6 +538,9 @@ namespace eka2l1::enhance {
             ref.palette = hook.texture.palette.empty() ? 0 : to_u32(hook.texture.palette.eval(ctx));
             ref.format = hook.texture.format;
             ref.palette_format = hook.texture.palette_format;
+            // The stride the palette is read with, so that the frame reports it.
+            ref.palette_stride = (ref.format != FORMAT_P8 && ref.format != FORMAT_P4) ? 0
+                : (hook.texture.palette_stride ? hook.texture.palette_stride : bytes_per_pixel(ref.palette_format));
             if (!hook.texture.key.empty()) {
                 ref.has_key = true;
                 ref.key = to_u32(hook.texture.key.eval(ctx));
@@ -752,7 +758,9 @@ namespace eka2l1::enhance {
         }
 
         if ((texture.format == FORMAT_P8 || texture.format == FORMAT_P4) && texture.palette) {
-            feed(texture.palette, (texture.format == FORMAT_P4 ? 16 : 256) * bytes_per_pixel(texture.palette_format));
+            const std::uint32_t entry = bytes_per_pixel(texture.palette_format);
+            const std::uint32_t stride = texture.palette_stride ? texture.palette_stride : entry;
+            feed(texture.palette, ((texture.format == FORMAT_P4) ? 15 : 255) * stride + entry);
         }
 
         hash = XXH64_digest(state);
@@ -781,16 +789,20 @@ namespace eka2l1::enhance {
 
         std::uint32_t palette[256] = {};
         if (paletted) {
+            // An engine may keep its palette in wider entries than the
+            // colour needs (12 bits in a 32-bit word): the stride says so.
             const std::uint32_t entry = bytes_per_pixel(texture.palette_format);
+            const std::uint32_t stride = texture.palette_stride ? texture.palette_stride : entry;
             const std::uint32_t colours = packed ? 16 : 256;
-            std::uint8_t raw[256 * 4];
+            std::uint8_t raw[256 * MAX_PALETTE_STRIDE];
             if (!entry || texture.palette_format == FORMAT_P8 || texture.palette_format == FORMAT_P4 || !texture.palette
-                || !read_guest(pr, texture.palette, raw, colours * entry)) {
+                || stride < entry || stride > MAX_PALETTE_STRIDE
+                || !read_guest(pr, texture.palette, raw, (colours - 1) * stride + entry)) {
                 return false;
             }
 
             for (std::uint32_t n = 0; n < colours; n++) {
-                palette[n] = to_rgba(texture.palette_format, read_pixel(raw + n * entry, entry));
+                palette[n] = to_rgba(texture.palette_format, read_pixel(raw + n * stride, entry));
             }
         }
 
@@ -992,6 +1004,21 @@ namespace eka2l1::enhance {
                         hook.texture.palette_format = format_of(texture["paletteFormat"], "palette format", paletted);
                         if (paletted && hook.texture.palette.empty()) {
                             throw api_error(400, "bad_profile", where + ": a paletted texture needs `palette`");
+                        }
+
+                        const json &stride = texture["paletteStride"];
+                        if (!stride.is_null()) {
+                            if (!paletted) {
+                                throw api_error(400, "bad_profile", where + ": `paletteStride` belongs to a paletted texture");
+                            }
+
+                            const double value = stride.is_number() ? stride.number() : 0;
+                            if (value != std::floor(value) || value < bytes_per_pixel(hook.texture.palette_format)
+                                || value > MAX_PALETTE_STRIDE) {
+                                throw api_error(400, "bad_profile", where + ": `paletteStride` must be a whole number from the size of a palette entry to 16");
+                            }
+
+                            hook.texture.palette_stride = static_cast<std::uint32_t>(value);
                         }
                     }
 
