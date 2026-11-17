@@ -76,6 +76,7 @@ add_library(epocservs
         include/services/fbs/linked_font_config.h
         include/services/fbs/palette.h
         include/services/featmgr/featmgr.h
+        include/services/fs/factory.h
         include/services/fs/sec.h
         include/services/fs/fs.h
         include/services/goommonitor/goommonitor.h
@@ -241,6 +242,7 @@ add_library(epocservs
         src/featmgr/featmgr.cpp
         src/fs/dirs.cpp
         src/fs/drives.cpp
+        src/fs/factory.cpp
         src/fs/files.cpp
         src/fs/fs.cpp
         src/fs/parser.cpp

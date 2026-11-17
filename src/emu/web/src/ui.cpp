@@ -8,6 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <emscripten/threading.h>
+#include <system_error>
+#include <thread>
+#include <utility>
 
 namespace eka2l1::common {
     // A guest asking for the phone's browser opens the link in a new tab. The
@@ -30,6 +33,14 @@ namespace eka2l1::common {
 
 // The page has no native text or question dialogs wired up yet. Guests that ask
 // for one get an immediate refusal instead of waiting forever.
+//
+// The refusal of a question comes from a thread of its own. The notifier asks
+// while it holds the kernel lock and its completion takes that lock again, as
+// it may when a frontend answers from its UI thread; answering on the caller's
+// thread would lock a plain mutex twice and stop the emulator for good. Like
+// an answer from a UI thread, it relies on the completion's own check that
+// the request still exists. A global message query is refused by the empty
+// return value before the thread runs, which then finds nothing to complete.
 namespace eka2l1::drivers::ui {
     bool open_input_view(const std::u16string &, const int, input_dialog_complete_callback) {
         return false;
@@ -41,7 +52,11 @@ namespace eka2l1::drivers::ui {
     dialog_cancel_callback show_yes_no_dialog(const std::u16string &, const std::u16string &, const std::u16string &,
         yes_no_dialog_complete_callback complete_callback) {
         if (complete_callback) {
-            complete_callback(0);
+            try {
+                std::thread([complete = std::move(complete_callback)] { complete(0); }).detach();
+            } catch (const std::system_error &) {
+                // No thread to answer from: the guest's request stays open, the emulator goes on.
+            }
         }
         return {};
     }
