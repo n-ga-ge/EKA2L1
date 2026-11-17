@@ -29,7 +29,12 @@ namespace eka2l1::enhance {
         FORMAT_ARGB8888,
         FORMAT_XRGB8888,
         FORMAT_A8,
-        FORMAT_L8
+        FORMAT_L8,
+        // Sixteen colours: two texels a byte, the first in the low four bits.
+        FORMAT_P4,
+        // Five bits a channel with red lowest, and the value zero transparent:
+        // a PlayStation's colours.
+        FORMAT_BGR555K
     };
 
     enum blend_mode : std::uint8_t {
@@ -38,7 +43,9 @@ namespace eka2l1::enhance {
         BLEND_ADD,
         BLEND_MULTIPLY,
         // Texels with alpha zero are not drawn; the rest replace the pixel.
-        BLEND_KEY
+        BLEND_KEY,
+        // The pixel minus the colour, not below zero.
+        BLEND_SUBTRACT
     };
 
     enum depth_mode : std::uint8_t {

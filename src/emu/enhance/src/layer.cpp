@@ -1051,6 +1051,14 @@ void main() {
                         drivers::blend_factor::zero, drivers::blend_factor::one);
                     break;
 
+                case BLEND_SUBTRACT:
+                    // The pixel minus the triangle's colour, stopping at black.
+                    builder.set_feature(drivers::graphics_feature::blend, true);
+                    builder.blend_formula(drivers::blend_equation::isub, drivers::blend_equation::add,
+                        drivers::blend_factor::one, drivers::blend_factor::one,
+                        drivers::blend_factor::zero, drivers::blend_factor::one);
+                    break;
+
                 default:
                     builder.set_feature(drivers::graphics_feature::blend, false);
                     break;

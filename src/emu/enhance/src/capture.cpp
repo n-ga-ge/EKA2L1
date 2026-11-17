@@ -593,6 +593,7 @@ namespace eka2l1::enhance {
         case FORMAT_RGB565:
         case FORMAT_RGB555:
         case FORMAT_ARGB1555:
+        case FORMAT_BGR555K:
             return 2;
         case FORMAT_RGB888:
             return 3;
@@ -646,6 +647,12 @@ namespace eka2l1::enhance {
             g = (raw >> 8) & 255;
             b = raw & 255;
             break;
+        case FORMAT_BGR555K:
+            a = (raw & 0xFFFF) ? 255 : 0;
+            r = (raw & 31) * 255 / 31;
+            g = ((raw >> 5) & 31) * 255 / 31;
+            b = ((raw >> 10) & 31) * 255 / 31;
+            break;
         case FORMAT_A8:
             r = g = b = 255;
             a = raw & 255;
@@ -679,8 +686,13 @@ namespace eka2l1::enhance {
         return pr;
     }
 
+    // Bytes a row of the texture takes; a four-bit texture packs two texels in a byte.
+    static std::uint32_t row_bytes_of(const texture_ref &texture) {
+        return (texture.format == FORMAT_P4) ? (texture.width + 1) / 2 : texture.width * bytes_per_pixel(texture.format);
+    }
+
     static bool usable(const texture_ref &texture) {
-        return bytes_per_pixel(texture.format) && texture.pixels && texture.width && texture.height
+        return (bytes_per_pixel(texture.format) || texture.format == FORMAT_P4) && texture.pixels && texture.width && texture.height
             && texture.width <= MAX_TEXTURE_SIDE && texture.height <= MAX_TEXTURE_SIDE;
     }
 
@@ -690,9 +702,8 @@ namespace eka2l1::enhance {
             return false;
         }
 
-        const std::uint32_t size = bytes_per_pixel(texture.format);
-        const std::uint32_t pitch = texture.pitch ? texture.pitch : texture.width * size;
-        const std::uint32_t row = texture.width * size;
+        const std::uint32_t row = row_bytes_of(texture);
+        const std::uint32_t pitch = texture.pitch ? texture.pitch : row;
 
         XXH64_state_t *state = XXH64_createState();
         XXH64_reset(state, 0);
@@ -721,8 +732,8 @@ namespace eka2l1::enhance {
             }
         }
 
-        if (texture.format == FORMAT_P8 && texture.palette) {
-            feed(texture.palette, 256 * bytes_per_pixel(texture.palette_format));
+        if ((texture.format == FORMAT_P8 || texture.format == FORMAT_P4) && texture.palette) {
+            feed(texture.palette, (texture.format == FORMAT_P4 ? 16 : 256) * bytes_per_pixel(texture.palette_format));
         }
 
         hash = XXH64_digest(state);
@@ -736,7 +747,10 @@ namespace eka2l1::enhance {
     }
 
     bool engine::decode_locked(const std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba) {
-        const std::uint32_t size = bytes_per_pixel(texture.format);
+        // A four-bit texture is read a byte at a time and split below.
+        const bool packed = (texture.format == FORMAT_P4);
+        const bool paletted = packed || (texture.format == FORMAT_P8);
+        const std::uint32_t size = packed ? 1 : bytes_per_pixel(texture.format);
         if (!usable(texture)) {
             return false;
         }
@@ -747,26 +761,28 @@ namespace eka2l1::enhance {
         }
 
         std::uint32_t palette[256] = {};
-        if (texture.format == FORMAT_P8) {
+        if (paletted) {
             const std::uint32_t entry = bytes_per_pixel(texture.palette_format);
+            const std::uint32_t colours = packed ? 16 : 256;
             std::uint8_t raw[256 * 4];
-            if (!entry || texture.palette_format == FORMAT_P8 || !texture.palette
-                || !read_guest(pr, texture.palette, raw, 256 * entry)) {
+            if (!entry || texture.palette_format == FORMAT_P8 || texture.palette_format == FORMAT_P4 || !texture.palette
+                || !read_guest(pr, texture.palette, raw, colours * entry)) {
                 return false;
             }
 
-            for (std::uint32_t n = 0; n < 256; n++) {
+            for (std::uint32_t n = 0; n < colours; n++) {
                 palette[n] = to_rgba(texture.palette_format, read_pixel(raw + n * entry, entry));
             }
         }
 
-        const std::uint32_t pitch = texture.pitch ? texture.pitch : texture.width * size;
-        if (pitch < texture.width * size) {
+        const std::uint32_t row_bytes = packed ? (texture.width + 1) / 2 : texture.width * size;
+        const std::uint32_t pitch = texture.pitch ? texture.pitch : row_bytes;
+        if (pitch < row_bytes) {
             return false;
         }
 
         rgba.resize(std::size_t(texture.width) * texture.height);
-        std::vector<std::uint8_t> row(std::size_t(texture.width) * size);
+        std::vector<std::uint8_t> row(row_bytes);
 
         for (std::uint32_t y = 0; y < texture.height; y++) {
             if (!read_guest(pr, texture.pixels + y * pitch, row.data(), static_cast<std::uint32_t>(row.size()))) {
@@ -775,8 +791,8 @@ namespace eka2l1::enhance {
 
             std::uint32_t *out = rgba.data() + std::size_t(y) * texture.width;
             for (std::uint32_t x = 0; x < texture.width; x++) {
-                const std::uint32_t raw = read_pixel(row.data() + x * size, size);
-                std::uint32_t pixel = (texture.format == FORMAT_P8) ? palette[raw] : to_rgba(texture.format, raw);
+                const std::uint32_t raw = packed ? ((row[x / 2] >> ((x & 1) * 4)) & 15U) : read_pixel(row.data() + x * size, size);
+                std::uint32_t pixel = paletted ? palette[raw] : to_rgba(texture.format, raw);
                 if (texture.has_key && raw == texture.key) {
                     pixel &= 0x00FFFFFF;
                 }
@@ -792,7 +808,7 @@ namespace eka2l1::enhance {
             { "p8", FORMAT_P8 }, { "rgb444", FORMAT_RGB444 }, { "argb4444", FORMAT_ARGB4444 },
             { "rgb565", FORMAT_RGB565 }, { "rgb555", FORMAT_RGB555 }, { "argb1555", FORMAT_ARGB1555 },
             { "rgb888", FORMAT_RGB888 }, { "argb8888", FORMAT_ARGB8888 }, { "xrgb8888", FORMAT_XRGB8888 },
-            { "a8", FORMAT_A8 }, { "l8", FORMAT_L8 }
+            { "a8", FORMAT_A8 }, { "l8", FORMAT_L8 }, { "p4", FORMAT_P4 }, { "bgr555k", FORMAT_BGR555K }
         };
 
         if (value.is_null() && !required) {
@@ -897,7 +913,7 @@ namespace eka2l1::enhance {
                         hook.target.height = required_field(target["height"], names, where + " target.height");
                         hook.target.pitch = compile_field(target["pitch"], names, where + " target.pitch");
                         hook.target.format = format_of(target["format"], "target format", true);
-                        if (hook.target.format == FORMAT_P8) {
+                        if (hook.target.format == FORMAT_P8 || hook.target.format == FORMAT_P4) {
                             throw api_error(400, "bad_profile", where + ": a target cannot be paletted");
                         }
                     }
@@ -953,16 +969,16 @@ namespace eka2l1::enhance {
                         hook.texture.palette = compile_field(texture["palette"], names, where + " texture.palette");
                         hook.texture.key = compile_field(texture["key"], names, where + " texture.key");
                         hook.texture.format = format_of(texture["format"], "texture format", true);
-                        hook.texture.palette_format = format_of(texture["paletteFormat"], "palette format",
-                            hook.texture.format == FORMAT_P8);
-                        if (hook.texture.format == FORMAT_P8 && hook.texture.palette.empty()) {
+                        const bool paletted = (hook.texture.format == FORMAT_P8) || (hook.texture.format == FORMAT_P4);
+                        hook.texture.palette_format = format_of(texture["paletteFormat"], "palette format", paletted);
+                        if (paletted && hook.texture.palette.empty()) {
                             throw api_error(400, "bad_profile", where + ": a paletted texture needs `palette`");
                         }
                     }
 
                     static const std::pair<const char *, blend_mode> blends[] = {
                         { "none", BLEND_NONE }, { "alpha", BLEND_ALPHA }, { "add", BLEND_ADD },
-                        { "multiply", BLEND_MULTIPLY }, { "key", BLEND_KEY }
+                        { "multiply", BLEND_MULTIPLY }, { "key", BLEND_KEY }, { "subtract", BLEND_SUBTRACT }
                     };
                     static const std::pair<const char *, depth_mode> depths[] = {
                         { "none", DEPTH_NONE }, { "less", DEPTH_LESS }, { "lequal", DEPTH_LEQUAL },
@@ -1040,7 +1056,7 @@ namespace eka2l1::enhance {
     std::shared_ptr<frame> engine::parse_frame(const json &body) {
         static const std::pair<const char *, blend_mode> blends[] = {
             { "none", BLEND_NONE }, { "alpha", BLEND_ALPHA }, { "add", BLEND_ADD },
-            { "multiply", BLEND_MULTIPLY }, { "key", BLEND_KEY }
+            { "multiply", BLEND_MULTIPLY }, { "key", BLEND_KEY }, { "subtract", BLEND_SUBTRACT }
         };
         static const std::pair<const char *, depth_mode> depths[] = {
             { "none", DEPTH_NONE }, { "less", DEPTH_LESS }, { "lequal", DEPTH_LEQUAL },
