@@ -32,7 +32,12 @@ namespace eka2l1::epoc::bt::web {
             mid_->device_name(name);
         }
 
-        stack_->set_fallback_name(name);
+        // Games set the name they just read, over and over: only a change is
+        // worth a line among the last operations.
+        if (stack_->set_name(name)) {
+            stack_->note("set-name", BTLINK_MANAGER_PROTOCOL_ID, 0, 0, epoc::error_none);
+        }
+
         return true;
     }
 

@@ -93,7 +93,7 @@ namespace eka2l1::epoc::bt::web {
 
         {
             const std::lock_guard<std::mutex> guard(stk->lock());
-            stk->set_fallback_name(mm->device_name());
+            stk->set_name(mm->device_name());
         }
 
         std::unique_ptr<epoc::socket::protocol> btlink_pr = std::make_unique<btlink_web_protocol>(mid, oldarch);

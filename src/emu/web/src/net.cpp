@@ -102,6 +102,8 @@ namespace eka2l1::web {
             // Without a running guest there is no Bluetooth device to have an address.
             { "attached", diag.attached },
             { "address", null_if_empty(diag.address) },
+            // The device's Bluetooth name as the other players' games are told it.
+            { "name", diag.attached ? control::json(diag.name) : control::json(nullptr) },
             { "peers", peers },
             { "listeners", listeners },
             { "connections", connections },
@@ -119,8 +121,10 @@ namespace eka2l1::web {
 
 extern "C" {
 // The page's room link came up (self_id is our id in the room, 1 to 255) or
-// went down (0). `name` is the device name the other players' games show,
-// UTF-8, at most 64 bytes; null or empty leaves the device's own name.
+// went down (0). `name` is the player's name in the room, UTF-8, at most 64
+// bytes: it becomes the device's Bluetooth name, which is what the other
+// players' games are shown, until the guest sets another; null or empty
+// leaves the device's own name.
 EMSCRIPTEN_KEEPALIVE void eka2l1_web_net_link(int self_id, const char *name) {
     net_link::get().post_link(self_id, name);
 }

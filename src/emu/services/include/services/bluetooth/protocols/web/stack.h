@@ -227,6 +227,7 @@ namespace eka2l1::epoc::bt::web {
         bool thread = false; ///< The link's drain thread exists.
         link_state link;
         std::string address;
+        std::string name; ///< The device's Bluetooth name, as the others are told it.
 
         std::vector<peer> peers;
         std::vector<listener_entry> listeners;
@@ -251,7 +252,8 @@ namespace eka2l1::epoc::bt::web {
         bool dead_ = false;
 
         device_address address_{};
-        std::u16string fallback_name_;
+        std::u16string name_; ///< The device's Bluetooth name: what the guest reads and the others are told.
+        std::string link_name_taken_; ///< The room name that last became the device's name.
         std::uint32_t epoch_ = 0;
         std::uint32_t conn_counter_ = 0;
 
@@ -273,6 +275,7 @@ namespace eka2l1::epoc::bt::web {
         void unqueue(const std::shared_ptr<channel> &chan);
 
         std::string announced_name() const;
+        void take_link_name();
         void send_announce(const int dst);
         void send_control(const int dst, const std::uint8_t type, const std::uint8_t flags, const std::uint32_t conn,
             const std::uint8_t *body, const std::size_t body_size);
@@ -341,8 +344,14 @@ namespace eka2l1::epoc::bt::web {
             return !dead_;
         }
 
-        /// The name other players see: the page's, else the device's own.
-        void set_fallback_name(const std::u16string &name);
+        /// The device's Bluetooth name. A phone has one: the guest reads it,
+        /// the guest may change it, and a search by another phone shows it.
+        /// The name the player has in the room becomes it when the player
+        /// enters the room; a name the guest sets after that replaces it,
+        /// because games put things in it that the other side looks for
+        /// (Call of Duty hosts under its UID followed by the old name, and
+        /// joins only a device named so). Returns whether the name changed.
+        bool set_name(const std::u16string &name);
         std::u16string local_name() const;
 
         std::vector<peer_info> announced_peers() const;
