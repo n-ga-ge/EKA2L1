@@ -42,6 +42,7 @@ using namespace eka2l1;
 
 namespace eka2l1::drivers {
     extern std::atomic<std::uint64_t> web_graphics_busy_us;
+    extern std::atomic<int> web_debug_animation_frames;
 }
 
 namespace {
@@ -286,6 +287,14 @@ EMSCRIPTEN_KEEPALIVE double eka2l1_web_heap_used() {
 
 EMSCRIPTEN_KEEPALIVE double eka2l1_web_frames() {
     return static_cast<double>(state.frames.load());
+}
+
+// For tests of a page the browser does not draw (a tab in the background, a
+// window that is covered): 1 makes the graphics thread act as if no animation
+// frame arrived, 2 also switches off the timer that stands in for them, which
+// is how the build behaved before it had one. 0 is normal.
+EMSCRIPTEN_KEEPALIVE void eka2l1_web_debug_animation_frames(int mode) {
+    drivers::web_debug_animation_frames.store(mode);
 }
 
 // Backing size of the canvas in pixels. Applied by the graphics thread with

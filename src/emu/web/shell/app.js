@@ -800,7 +800,7 @@ function renderGuide() {
       item('Then use the game\'s own multiplayer menu, as you would over Bluetooth: one player hosts a game there and the others join it.',
         facts && facts.bluetooth && facts.menu ? ` In this game: ${facts.menu}.` : ''),
       item('Everyone has to run the same game. The room\'s code and the number of players in it are shown beside the Pause button while you are in one.'),
-      item('While someone else is in the room, keep this tab in view. Their games wait for yours: the page does not pause it when the tab is hidden, but a browser stops drawing a tab it does not show, and the game may stand still until you come back.')));
+      item('While someone else is in the room, your game keeps running when this tab is in the background or its window is covered, because their games wait for yours. You then do not see what happens in it, so keep it in view while you play.')));
 }
 
 // --- multiplayer -------------------------------------------------------------------
@@ -1136,8 +1136,8 @@ async function closeGame() {
 // A hidden tab gets no animation frames, so the game cannot be shown anyway:
 // pause it, and pick up again when the tab returns. Not while other players
 // are in a multiplayer room with this one, because their games wait for this
-// one's answers and a paused emulator gives none. (How far the game gets
-// unseen is then up to the emulator, which draws on animation frames.) Called
+// one's answers and a paused emulator gives none. (The emulator then goes on
+// by a timer of its own: see ogl_graphics_driver::run.) Called
 // again whenever the room changes, so a tab that is hidden when the last
 // other player leaves pauses then.
 function followVisibility() {
