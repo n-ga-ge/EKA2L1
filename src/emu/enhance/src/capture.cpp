@@ -26,6 +26,7 @@ namespace eka2l1::enhance {
     static constexpr std::size_t MAX_FRAME_VERTICES = 300000;
     static constexpr int MAX_DRAW_VERTICES = 4096;
     static constexpr std::uint32_t MAX_TEXTURE_SIDE = 2048;
+    static constexpr std::uint32_t MAX_PALETTE_STRIDE = 16;
 
     static std::uint32_t to_u32(const double value) {
         return std::isfinite(value) ? static_cast<std::uint32_t>(static_cast<std::int64_t>(value)) : 0;
@@ -467,6 +468,7 @@ namespace eka2l1::enhance {
             ref.palette = hook.texture.palette.empty() ? 0 : to_u32(hook.texture.palette.eval(ctx));
             ref.format = hook.texture.format;
             ref.palette_format = hook.texture.palette_format;
+            ref.palette_stride = hook.texture.palette_stride;
             if (!hook.texture.key.empty()) {
                 ref.has_key = true;
                 ref.key = to_u32(hook.texture.key.eval(ctx));
@@ -637,15 +639,19 @@ namespace eka2l1::enhance {
 
         std::uint32_t palette[256] = {};
         if (texture.format == FORMAT_P8) {
+            // An engine may keep its palette in wider entries than the
+            // colour needs (12 bits in a 32-bit word): the stride says so.
             const std::uint32_t entry = bytes_per_pixel(texture.palette_format);
-            std::uint8_t raw[256 * 4];
+            const std::uint32_t stride = texture.palette_stride ? texture.palette_stride : entry;
+            std::uint8_t raw[256 * MAX_PALETTE_STRIDE];
             if (!entry || texture.palette_format == FORMAT_P8 || !texture.palette
-                || !read_guest(pr, texture.palette, raw, 256 * entry)) {
+                || stride < entry || stride > MAX_PALETTE_STRIDE
+                || !read_guest(pr, texture.palette, raw, 255 * stride + entry)) {
                 return false;
             }
 
             for (std::uint32_t n = 0; n < 256; n++) {
-                palette[n] = to_rgba(texture.palette_format, read_pixel(raw + n * entry, entry));
+                palette[n] = to_rgba(texture.palette_format, read_pixel(raw + n * stride, entry));
             }
         }
 
@@ -845,6 +851,14 @@ namespace eka2l1::enhance {
                             hook.texture.format == FORMAT_P8);
                         if (hook.texture.format == FORMAT_P8 && hook.texture.palette.empty()) {
                             throw api_error(400, "bad_profile", where + ": a paletted texture needs `palette`");
+                        }
+
+                        if (!texture["paletteStride"].is_null()) {
+                            hook.texture.palette_stride = number_of(texture["paletteStride"], where + " texture.paletteStride");
+                            if (hook.texture.palette_stride < bytes_per_pixel(hook.texture.palette_format)
+                                || hook.texture.palette_stride > MAX_PALETTE_STRIDE) {
+                                throw api_error(400, "bad_profile", where + ": `paletteStride` must be at least the size of a palette entry and at most 16");
+                            }
                         }
                     }
 

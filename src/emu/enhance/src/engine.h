@@ -63,6 +63,7 @@ namespace eka2l1::enhance {
         expr id, pixels, width, height, pitch, palette, key;
         texture_format format = FORMAT_NONE;
         texture_format palette_format = FORMAT_NONE;
+        std::uint32_t palette_stride = 0;
     };
 
     struct target_spec {

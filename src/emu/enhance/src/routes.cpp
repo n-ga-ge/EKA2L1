@@ -295,6 +295,7 @@ namespace eka2l1::enhance {
                 { "width", static_cast<std::int64_t>(t.width) }, { "height", static_cast<std::int64_t>(t.height) },
                 { "pitch", static_cast<std::int64_t>(t.pitch) }, { "format", format_name(t.format) },
                 { "palette", hex(t.palette) }, { "paletteFormat", format_name(t.palette_format) },
+                { "paletteStride", static_cast<std::int64_t>(t.palette_stride) },
                 { "key", t.has_key ? json(hex(t.key)) : json(nullptr) } });
         }
 

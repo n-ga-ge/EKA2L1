@@ -70,6 +70,9 @@ namespace eka2l1::enhance {
         std::uint32_t width = 0, height = 0;
         std::uint32_t pitch = 0;
         std::uint32_t palette = 0;
+        // Bytes from one palette entry to the next; 0 is the size of an
+        // entry in the palette's format (the entries lie one after another).
+        std::uint32_t palette_stride = 0;
         texture_format format = FORMAT_NONE;
         texture_format palette_format = FORMAT_NONE;
         bool has_key = false;
@@ -77,7 +80,8 @@ namespace eka2l1::enhance {
 
         bool operator==(const texture_ref &other) const {
             return id == other.id && pixels == other.pixels && width == other.width && height == other.height
-                && pitch == other.pitch && palette == other.palette && format == other.format
+                && pitch == other.pitch && palette == other.palette && palette_stride == other.palette_stride
+                && format == other.format
                 && palette_format == other.palette_format && has_key == other.has_key && key == other.key;
         }
     };
