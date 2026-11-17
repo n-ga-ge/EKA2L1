@@ -126,7 +126,7 @@ namespace eka2l1::epoc::bt::web {
         peers_.clear();
 
         // The room may be older than this guest: a restart leaves the link up.
-        take_link_name();
+        remember_given_name(room_name());
 
         if (link_.up) {
             for (const int id : link_.peers) {
@@ -190,12 +190,36 @@ namespace eka2l1::epoc::bt::web {
         }
     }
 
+    void stack::remember_given_name(const std::u16string &name) {
+        if (name.empty() || (std::find(given_names_.begin(), given_names_.end(), name) != given_names_.end())) {
+            return;
+        }
+
+        // A player does not change names often; this only keeps the list finite.
+        static constexpr std::size_t MAX_GIVEN_NAMES = 16;
+        if (given_names_.size() >= MAX_GIVEN_NAMES) {
+            given_names_.erase(given_names_.begin() + 1);
+        }
+
+        given_names_.push_back(name);
+    }
+
+    void stack::set_device_name(const std::u16string &name) {
+        device_name_ = name;
+        remember_given_name(name);
+
+        if (link_up()) {
+            send_announce(0);
+        }
+    }
+
     bool stack::set_name(const std::u16string &name) {
-        if (name_ == name) {
+        if (guest_named_ && (guest_name_ == name)) {
             return false;
         }
 
-        name_ = name;
+        guest_named_ = true;
+        guest_name_ = name;
 
         if (link_up()) {
             send_announce(0);
@@ -204,25 +228,43 @@ namespace eka2l1::epoc::bt::web {
         return true;
     }
 
+    std::u16string stack::room_name() const {
+        return (link_.up && !link_.name.empty()) ? name_from_utf8(link_.name) : std::u16string();
+    }
+
     std::u16string stack::local_name() const {
-        return name_;
+        if (guest_named_) {
+            return guest_name_;
+        }
+
+        const std::u16string room = room_name();
+        return room.empty() ? device_name_ : room;
     }
 
     std::string stack::announced_name() const {
-        const std::string name = common::ucs2_to_utf8(name_);
-        return clean_name(name.data(), name.size(), link::MAX_NAME_SIZE);
-    }
+        std::u16string name = local_name();
+        const std::u16string room = room_name();
 
-    void stack::take_link_name() {
-        // Once per name, not once per link: the link comes up again after
-        // every lost connection to the room, and a game that is hosting under
-        // a name of its own must keep it then.
-        if (!link_.up || link_.name.empty() || (link_.name == link_name_taken_)) {
-            return;
+        if (guest_named_ && !room.empty()) {
+            // The longest given name the guest's ends with is the part that
+            // names the player. Only an end is looked for: what games add is
+            // in front, and a short name would match the start of anything.
+            const std::u16string *given = nullptr;
+
+            for (const std::u16string &candidate : given_names_) {
+                if ((candidate.size() <= name.size()) && (!given || (candidate.size() > given->size()))
+                    && (name.compare(name.size() - candidate.size(), candidate.size(), candidate) == 0)) {
+                    given = &candidate;
+                }
+            }
+
+            if (given) {
+                name.replace(name.size() - given->size(), given->size(), room);
+            }
         }
 
-        link_name_taken_ = link_.name;
-        name_ = common::utf8_to_ucs2(link_.name);
+        const std::string wire = name_to_utf8(name);
+        return clean_name(wire.data(), wire.size(), link::MAX_NAME_SIZE, true);
     }
 
     peer_info *stack::find_peer(const int id) {
@@ -722,7 +764,7 @@ namespace eka2l1::epoc::bt::web {
             }
         }
 
-        take_link_name();
+        remember_given_name(room_name());
 
         if (link_.up) {
             send_announce(0);
@@ -841,7 +883,9 @@ namespace eka2l1::epoc::bt::web {
         peer.epoch = epoch;
         std::memcpy(peer.address.addr_, body + 4, ADDRESS_SIZE);
         peer.address.padding_ = 0;
-        peer.name = clean_name(reinterpret_cast<const char *>(body + 11), body[10], link::MAX_NAME_SIZE);
+        // As the other guest named its device: see clean_name() for why its
+        // control characters stay.
+        peer.name = clean_name(reinterpret_cast<const char *>(body + 11), body[10], link::MAX_NAME_SIZE, true);
 
         // News to us means that we may be news to the sender: its guest may
         // have started after ours announced, with nobody there to hear it. The

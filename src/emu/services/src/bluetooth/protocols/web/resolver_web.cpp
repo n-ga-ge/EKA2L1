@@ -55,7 +55,7 @@ namespace eka2l1::epoc::bt::web {
             inquiry->minor_device_class_ = MINOR_DEVICE_PHONE_CECULLAR;
             cast_addr.family_ = BTADDR_PROTOCOL_FAMILY_ID;
 
-            result->name_.assign(nullptr, peer.name.empty() ? std::u16string(u"N-Gage") : common::utf8_to_ucs2(peer.name));
+            result->name_.assign(nullptr, peer.name.empty() ? std::u16string(u"N-Gage") : name_from_utf8(peer.name));
 
             info.complete(epoc::error_none);
             return;
