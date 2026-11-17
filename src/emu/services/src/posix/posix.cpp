@@ -29,13 +29,17 @@
 #include <common/time.h>
 
 #include <kernel/kernel.h>
+#include <mem/mem.h>
 #include <system/epoc.h>
 
 #include <utils/err.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 #include <limits>
+#include <optional>
+#include <string>
 
 #if EKA2L1_PLATFORM(POSIX)
 #include <unistd.h>
@@ -96,6 +100,38 @@ namespace eka2l1 {
             auto *last = reinterpret_cast<std::uint8_t *>(process->get_ptr_on_addr_space(
                 start + static_cast<address>(size - 1)));
             return first && last && (last == first + size - 1);
+        }
+
+        // Copy a guest range that valid_guest_range() turned down because it runs
+        // past the top of the calling thread's stack, with zeros for the pages that
+        // have no memory behind them. The range has to stay inside the addresses
+        // the stack's chunk reserves: on EKA1 that is the megabyte the chunk owns,
+        // elsewhere it ends with the stack, and the range is turned down as before.
+        std::optional<std::string> read_past_stack_top(kernel::process *process, kernel::thread *thread,
+            const address start, const std::size_t size, const std::size_t page_size) {
+            chunk_ptr stack = thread ? thread->get_stack_chunk() : nullptr;
+            if (!stack || (page_size == 0)) {
+                return std::nullopt;
+            }
+
+            const std::uint64_t stack_begin = stack->base(process).ptr_address();
+            const std::uint64_t stack_end = stack_begin + stack->max_size();
+            if ((start < stack_begin) || (static_cast<std::uint64_t>(start) + size > stack_end)) {
+                return std::nullopt;
+            }
+
+            std::string data(size, '\0');
+            for (std::size_t done = 0; done < size;) {
+                const address current = start + static_cast<address>(done);
+                const std::size_t piece = std::min(size - done, page_size - (current % page_size));
+                if (const void *source = process->get_ptr_on_addr_space(current)) {
+                    std::memcpy(data.data() + done, source, piece);
+                }
+
+                done += piece;
+            }
+
+            return data;
         }
 
         std::optional<std::u16string> read_guest_path(kernel::process *process, const ptr<std::int16_t> path) {
@@ -589,12 +625,25 @@ namespace eka2l1 {
     void posix_server::write(service::ipc_context &ctx) {
         POSIX_REQUEST_INIT(ctx);
 
-        if (!valid_guest_range(own_process, params->ptr[0].ptr_address(), params->len[0])) {
-            params->ret = -1;
-            POSIX_REQUEST_FINISH_WITH_ERR(ctx, EFAULT);
-        }
-
         char *source_ptr = params->ptr[0].get(own_process);
+        std::optional<std::string> past_stack_top;
+
+        if (!valid_guest_range(own_process, params->ptr[0].ptr_address(), params->len[0])) {
+            // The Sims Bustin' Out reserves its 8 KB save file by writing that many
+            // bytes starting at a variable near the top of its stack. On the phone
+            // the memory after the stack is mapped, so the write succeeds and the
+            // content does not matter. Here nothing is mapped after the stack.
+            past_stack_top = read_past_stack_top(own_process, ctx.msg->own_thr, params->ptr[0].ptr_address(),
+                params->len[0], static_cast<std::size_t>(ctx.sys->get_memory_system()->get_page_size()));
+            if (!past_stack_top) {
+                params->ret = -1;
+                POSIX_REQUEST_FINISH_WITH_ERR(ctx, EFAULT);
+            }
+
+            LOG_TRACE(SERVICE_POSIX, "Write of {} bytes from 0x{:X} runs past the top of the stack, the unmapped part is sent as zeros",
+                params->len[0], params->ptr[0].ptr_address());
+            source_ptr = past_stack_top->data();
+        }
 
         params->ret = static_cast<std::int32_t>(
             file_manager.write(params->fid, params->len[0], source_ptr, *errnoptr));
