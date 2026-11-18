@@ -563,25 +563,43 @@ function wireControlsDialog() {
 // --- display -----------------------------------------------------------------------
 
 // `shader` names a file in the emulator's resources/upscale folder. Only ones
-// checked to compile and change the picture under WebGL2 are listed (the
-// upstream xBR filters do not).
+// checked to compile and change the picture under WebGL2 are listed. `nearest`
+// marks a shader that compares neighbouring texels and therefore needs the
+// texture unfiltered (the upstream xBR ones: with linear filtering they see
+// blended colours, find no edge and give plain smoothing). The fork's own
+// shaders read texels directly and do not care. With a shader the emulator
+// keeps the game's screen at its own size and the shader does all of the
+// enlarging; without one (sharp pixels) the window server draws the screen at
+// the canvas's size (see the display callback in the frontend's state.cpp).
+// 'Default' is the driver's own shader, which only reads the texture: "Smooth"
+// uses it because the window server's enlargement with smooth filtering
+// blends the outermost rows and columns with black at most sizes.
+// `group` is the heading the
+// choice is listed under, which is also the advice on what it suits.
 const FILTERS = [
-  { id: 'nearest', label: 'Sharp pixels', hint: 'Every game pixel is a crisp block. Best with a whole-number resolution.' },
-  { id: 'linear', label: 'Smooth', hint: 'Plain bilinear blending.' },
-  { id: 'fsr', shader: 'fsr', label: 'FSR 1.0 upscale', hint: 'AMD FidelityFX Super Resolution 1.0: edge-adaptive upscaling that keeps edges clean without blockiness.' },
-  { id: 'fsr_sharp', shader: 'fsr_sharp', label: 'FSR 1.0 upscale + sharpen', hint: 'FSR 1.0 with its contrast-adaptive sharpening pass. Crisper, and about five times the GPU work.' },
-  { id: '4xhq', shader: '4xhq', label: 'HQ 4×', hint: 'Pixel-art scaler with soft gradients.' },
-  { id: 'fxaa', shader: 'fxaa', label: 'FXAA', hint: 'Anti-aliasing that softens jagged edges.' },
-  { id: 'sharpen', shader: 'sharpen', label: 'Sharpen', hint: 'A simple sharpening filter.' },
-  { id: 'natural', shader: 'natural', label: 'Natural colours', hint: 'Warmer, more saturated colours.' },
-  { id: 'scanline', shader: 'scanline', label: 'Scanlines', hint: 'Dark lines between rows, like an old display.' },
-  { id: 'CRT-Lottes', shader: 'CRT-Lottes', label: 'CRT', hint: 'Curved tube with a shadow mask and bloom.' },
-  { id: 'zfast_lcd', shader: 'zfast_lcd', label: 'LCD grid', hint: 'The visible pixel grid of a handheld LCD.' },
+  { id: 'nearest', group: 'Plain', label: 'Sharp pixels', hint: 'Every game pixel is a crisp block. The blocks are all the same size only at a whole-number scale: choose "Largest whole multiple" below, or "Sharp pixels, evened".' },
+  { id: 'linear', group: 'Plain', shader: 'Default', label: 'Smooth', hint: 'Plain bilinear blending. Soft at any size.' },
+  { id: 'sharp_bilinear', group: 'Plain', shader: 'sharp_bilinear', label: 'Sharp pixels, evened', hint: 'Crisp blocks of one size at any scale: only the thin border between two game pixels is blended. Suits every game when the picture fills the window.' },
+  { id: 'xbrz_freescale', group: 'For 2D pixel art', shader: 'xbrz_freescale', label: 'xBRZ', hint: 'Finds the edges in pixel art and redraws them as smooth lines and curves, at any scale. For 2D games with clean outlines; it makes dithered backgrounds and 3D scenes look painted.' },
+  { id: 'mmpx', group: 'For 2D pixel art', shader: 'mmpx', label: 'MMPX', hint: 'Doubles the detail of pixel art without blending: stairs become finer stairs and no colour is added. For 2D games. Best at an even scale (2×, 4×, 6×).' },
+  { id: '5xBR', group: 'For 2D pixel art', shader: '5xBR', nearest: true, label: 'xBR', hint: 'An older edge-finding scaler for pixel art, with hard edges and no blending. For 2D games.' },
+  { id: '4xhq', group: 'For 2D pixel art', shader: '4xhq', label: 'HQ 4×', hint: 'Pixel-art scaler with soft gradients.' },
+  { id: 'fsr', group: 'For 3D games', shader: 'fsr', label: 'FSR 1.0 upscale', hint: 'AMD FidelityFX Super Resolution 1.0: edge-adaptive upscaling that keeps edges clean without blockiness. For 3D games; it rounds off pixel art.' },
+  { id: 'fsr_sharp', group: 'For 3D games', shader: 'fsr_sharp', label: 'FSR 1.0 upscale + sharpen', hint: 'FSR 1.0 with its contrast-adaptive sharpening pass. Crisper, and about three times the GPU work. For 3D games.' },
+  { id: 'fxaa', group: 'For 3D games', shader: 'fxaa', label: 'FXAA', hint: 'Anti-aliasing that softens jagged edges.' },
+  { id: 'sharpen', group: 'For 3D games', shader: 'sharpen', label: 'Sharpen', hint: 'A simple sharpening filter.' },
+  { id: 'natural', group: 'Screen looks', shader: 'natural', label: 'Natural colours', hint: 'Warmer, more saturated colours.' },
+  { id: 'scanline', group: 'Screen looks', shader: 'scanline', label: 'Scanlines', hint: 'Dark lines between rows, like an old display.' },
+  { id: 'CRT-Lottes', group: 'Screen looks', shader: 'CRT-Lottes', label: 'CRT', hint: 'Curved tube with a shadow mask and bloom.' },
+  { id: 'zfast_lcd', group: 'Screen looks', shader: 'zfast_lcd', label: 'LCD grid', hint: 'The visible pixel grid of a handheld LCD.' },
 ];
 
+// 'auto' and 'fit' follow the window; a number is that many times the game's
+// own resolution, which the browser then fits to the window.
 const RESOLUTIONS = [
-  { id: 'auto', label: 'Match the display', hint: 'Renders at the size the picture is shown at, so scaling filters work at full detail.' },
-  ...[1, 2, 3, 4, 6].map((n) => ({ id: String(n), label: `${n}× native`, hint: '' })),
+  { id: 'auto', label: 'Match the display', hint: 'Fills the space, one canvas pixel per screen pixel. The scale is rarely a whole number, so "Sharp pixels" has rows and columns of two widths.' },
+  { id: 'fit', label: 'Largest whole multiple', hint: 'The largest whole multiple of the game\'s picture that fits, shown pixel for pixel: every game pixel is a square of the same size. Leaves a margin.' },
+  ...[1, 2, 3, 4, 6].map((n) => ({ id: String(n), label: `${n}× native`, hint: 'Rendered at this size; the browser then fits it to the window.' })),
 ];
 
 // What happens to the space a wide screen leaves beside the upright picture.
@@ -607,18 +625,80 @@ applyFill();
 // the picture centred in whatever canvas it is given. With the 'stretch' fill
 // the browser widens that canvas; a canvas as wide as the stage would cost the
 // scaling filters several times the work for a picture that is distorted anyway.
-function surfaceSize() {
+//
+// `exact` says the canvas is as large as the picture is to be shown, counted
+// in the screen's own pixels: placeCanvas() then shows it pixel for pixel.
+// Otherwise the style sheet fits it to the stage and the browser scales it.
+function surfacePlan() {
   const { width, height } = page.screen;
-  if (settings.display.resolution !== 'auto') {
-    const factor = Number(settings.display.resolution) || 3;
-    return [width * factor, height * factor];
+  const resolution = settings.display.resolution;
+  if (resolution !== 'auto' && resolution !== 'fit') {
+    const factor = Number(resolution) || 3;
+    return { width: width * factor, height: height * factor, exact: false };
   }
 
   const stage = $('stage').getBoundingClientRect();
-  const scale = Math.min(stage.width / width, stage.height / height) * (window.devicePixelRatio || 1);
+  const ratio = window.devicePixelRatio || 1;
+  // The stage in screen pixels, and how many times the picture fits in it.
+  const room = [Math.floor(stage.width * ratio + 0.01), Math.floor(stage.height * ratio + 0.01)];
+  const scale = Math.min(room[0] / width, room[1] / height);
+  const exact = settings.display.fill !== 'stretch';
   // Keep a huge window from asking for an enormous canvas.
-  const capped = Math.max(1, Math.min(scale, 2400 / height));
-  return [Math.round(width * capped), Math.round(height * capped)];
+  const most = 2400 / height;
+
+  if (resolution === 'fit') {
+    const multiple = Math.floor(Math.min(scale, most) + 0.001);
+    // A stage smaller than the picture itself: the browser shrinks it.
+    if (multiple < 1) return { width, height, exact: false };
+    return { width: width * multiple, height: height * multiple, exact };
+  }
+
+  const capped = Math.max(1, Math.min(scale, most));
+  const size = { width: Math.min(Math.round(width * capped), Math.max(room[0], width)), height: Math.min(Math.round(height * capped), Math.max(room[1], height)) };
+  return { ...size, exact: exact && capped === scale };
+}
+
+function surfaceSize() {
+  const plan = surfacePlan();
+  return [plan.width, plan.height];
+}
+
+// Shows the canvas at exactly its own size: one canvas pixel on one pixel of
+// the screen, centred in the stage on a whole pixel. The style sheet's way
+// (the canvas as large as the stage, the picture fitted into it) makes the
+// browser scale the picture a second time by a factor like 1.003 or place it
+// half a pixel off, which doubles a row of sharp pixels or blurs a filter's
+// work. With `exact` false the style sheet's way is put back.
+function placeCanvas(plan) {
+  const style = canvas.style;
+  canvas.classList.toggle('exact', plan.exact);
+  if (!plan.exact) {
+    style.width = style.height = style.left = style.top = '';
+    return;
+  }
+  const stage = $('stage').getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  const width = plan.width / ratio;
+  const height = plan.height / ratio;
+  // Whole screen pixels are 1 / ratio apart. With a whole ratio the place is
+  // a whole CSS pixel too, which a browser that places elements by CSS pixels
+  // (Chromium emulating a phone's screen) needs.
+  const step = Number.isInteger(ratio) ? 1 : 1 / ratio;
+  const snap = (edge, room, size) => Math.round((edge + (room - size) / 2) / step) * step - edge;
+  style.width = `${width}px`;
+  style.height = `${height}px`;
+  style.left = `${snap(stage.left, stage.width, width)}px`;
+  style.top = `${snap(stage.top, stage.height, height)}px`;
+}
+
+// Only the canvas's size and place, for a stage that changed its size: the
+// shader and the texture filter stay as they are.
+function applySize() {
+  if (!page.emu || !page.surface) return applyDisplay();
+  const plan = surfacePlan();
+  page.emu.module._eka2l1_web_set_surface_size(plan.width, plan.height);
+  placeCanvas(plan);
+  page.surface = { ...page.surface, width: plan.width, height: plan.height };
 }
 
 function applyDisplay() {
@@ -633,20 +713,24 @@ function applyDisplay() {
   if (fill.id === 'ambient' && !page.backdrop) page.backdrop = new Backdrop($('backdrop'), canvas, page.emu);
   if (page.backdrop) page.backdrop.show(fill.id === 'ambient', page.screen);
 
-  const [width, height] = surfaceSize();
+  const plan = surfacePlan();
+  const { width, height } = plan;
   module._eka2l1_web_set_surface_size(width, height);
   module.ccall('eka2l1_web_set_upscale_shader', null, ['string'], [filter.shader || '']);
-  page.emu.request('PATCH', '/v1/config', { nearestNeighborFiltering: filter.id === 'nearest' });
+  page.emu.request('PATCH', '/v1/config', { nearestNeighborFiltering: filter.id === 'nearest' || Boolean(filter.nearest) });
 
-  // The browser scales the canvas the rest of the way; match the look.
+  // Where the browser scales the canvas the rest of the way, match the look.
   canvas.style.imageRendering = filter.id === 'nearest' ? 'pixelated' : 'auto';
+  placeCanvas(plan);
   $('stage').style.setProperty('--aspect', `${page.screen.width} / ${page.screen.height}`);
   page.surface = { width, height, filter: filter.id, fill: fill.id };
 }
 
 function renderDisplay() {
   const filterSelect = $('filter-select');
-  filterSelect.innerHTML = FILTERS.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join('');
+  const groups = [...new Set(FILTERS.map((item) => item.group))];
+  filterSelect.innerHTML = groups.map((group) => `<optgroup label="${escapeHtml(group)}">${
+    FILTERS.filter((item) => item.group === group).map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join('')}</optgroup>`).join('');
   filterSelect.value = (FILTERS.find((item) => item.id === settings.display.filter) || FILTERS[0]).id;
 
   const resolutionSelect = $('resolution-select');
@@ -660,7 +744,9 @@ function renderDisplay() {
   const filter = FILTERS.find((item) => item.id === filterSelect.value);
   $('filter-hint').textContent = filter.hint;
   const [width, height] = surfaceSize();
-  $('resolution-hint').textContent = `Canvas ${width}×${height} (game screen ${page.screen.width}×${page.screen.height}).`;
+  const resolution = RESOLUTIONS.find((item) => item.id === resolutionSelect.value);
+  const times = width / page.screen.width;
+  $('resolution-hint').textContent = `${resolution.hint} Canvas ${width}×${height}: ${Number.isInteger(times) ? times : times.toFixed(2)} times the game's ${page.screen.width}×${page.screen.height}.`;
   $('fill-hint').textContent = `${FILLS.find((item) => item.id === fillSelect.value).hint} `
     + 'Beta. It only changes how the picture is shown: the game draws the same picture and does not show more of its world.';
 }
@@ -679,13 +765,32 @@ function wireDisplayDialog() {
   $('fill-select').addEventListener('change', change);
 
   let pending = 0;
+  // The resolutions that follow the window are worked out again when the
+  // stage changes its size. Until then the style sheet fits the canvas, so a
+  // window that is being dragged smaller never has the picture hanging out.
+  let last = '';
+  const follows = () => settings.display.resolution === 'auto' || settings.display.resolution === 'fit';
   const resized = () => {
+    if (!follows() || !page.emu) return;
+    const stage = $('stage').getBoundingClientRect();
+    const now = `${stage.width} ${stage.height} ${stage.left} ${stage.top} ${window.devicePixelRatio}`;
+    if (now === last) return;
+    last = now;
+    placeCanvas({ exact: false });
     clearTimeout(pending);
-    pending = setTimeout(() => { if (settings.display.resolution === 'auto') applyDisplay(); }, 150);
+    pending = setTimeout(() => {
+      if (!follows()) return;
+      applySize();
+      const placed = $('stage').getBoundingClientRect();
+      last = `${placed.width} ${placed.height} ${placed.left} ${placed.top} ${window.devicePixelRatio}`;
+    }, 150);
   };
   window.addEventListener('resize', resized);
   window.addEventListener('orientationchange', resized);
   document.addEventListener('fullscreenchange', resized);
+  // The stage also changes without the window doing so: the touch controls
+  // appear, a line of text above it wraps.
+  if (typeof ResizeObserver === 'function') new ResizeObserver(resized).observe($('stage'));
 }
 
 // --- saves -------------------------------------------------------------------------
