@@ -707,7 +707,11 @@ function placeCanvas(plan) {
 // Only the canvas's size and place, for a stage that changed its size: the
 // shader and the texture filter stay as they are.
 function applySize() {
-  if (!page.emu || !page.surface) return applyDisplay();
+  // Before the first launch there is no picture to size, and launch() applies
+  // the display settings itself. Doing it here could send PATCH /v1/config
+  // while the firmware is being installed, which the emulator then refuses
+  // as busy: the stage changes size while the page lays itself out.
+  if (!page.emu || !page.surface) return;
   const plan = surfacePlan();
   page.emu.module._eka2l1_web_set_surface_size(plan.width, plan.height);
   placeCanvas(plan);
