@@ -10,7 +10,7 @@
 // built-in profile), and a page with no catalogue stays that way.
 
 import { catalogIndex, enhanceProfile, gameBySlug, gameByUid, siteConfig } from './catalog.js';
-import { GAME_PROFILES, STANDARD_PROFILE, gameFacts, profileFor, profileFromEntry } from './games.js';
+import { GAME_PROFILES, PHONE_PROFILE, STANDARD_PROFILE, gameFacts, profileFor, profileFromEntry, standardFor } from './games.js';
 
 const fromCatalog = new Map(); // profile id -> profile built from a catalogue entry
 const gameProfile = new Map(); // app UID -> id of that game's catalogue profile
@@ -19,16 +19,29 @@ const profileLookups = new Map();
 
 const sameUid = (a, b) => String(a).toUpperCase() === String(b).toUpperCase();
 
+// The standard profile of the platform the running game is on: the
+// N-Gage's, or the Nokia 5320's for an N-Gage 2.0 game (usePlatform).
+let standard = STANDARD_PROFILE;
+export function usePlatform(platform) {
+  standard = standardFor(platform);
+}
+export function standardProfile() {
+  return standard;
+}
+// Whether a profile id is one of the standard profiles.
+export const isStandard = (id) => id === STANDARD_PROFILE.id || id === PHONE_PROFILE.id;
+
 // The profile to use when the layout is left on automatic: the catalogue's
 // for this game once it has arrived, else a built-in one, else the standard.
 export function autoProfile(uid) {
-  return (uid && fromCatalog.get(gameProfile.get(uid))) || profileFor(uid);
+  return (uid && fromCatalog.get(gameProfile.get(uid))) || profileFor(uid, standard);
 }
 
 // A profile the user chose by id, or null when nothing by that id is known
 // (yet). The catalogue's version of a profile wins over the built-in one.
 export function profileById(id) {
-  if (id === STANDARD_PROFILE.id) return STANDARD_PROFILE;
+  // A standard layout chosen on the other platform means this one's.
+  if (isStandard(id)) return standard;
   return fromCatalog.get(id) || Object.values(GAME_PROFILES).find((profile) => profile.id === id) || null;
 }
 
