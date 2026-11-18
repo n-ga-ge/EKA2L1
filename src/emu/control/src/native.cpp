@@ -15,6 +15,7 @@
 #include <drivers/audio/audio.h>
 #include <drivers/graphics/graphics.h>
 #include <drivers/input/common.h>
+#include <enhance/enhance.h>
 #include <filesystem>
 #include <kernel/kernel.h>
 #include <kernel/process.h>
@@ -303,6 +304,8 @@ namespace eka2l1::control {
             }
             if (req.method == "RESOLVE" && p == std::vector<std::string>{ "v1", "log" })
                 return response::from_json({ { "hostPath", frontend.log } });
+            if (response enhanced; enhance::handle_request(frontend.get_system(), req, enhanced))
+                return enhanced;
             auto body = req.data();
             if ((p == std::vector<std::string>{ "v1", "ngage2", "games" } && req.method == "GET")
                 || (p.size() == 5 && p[1] == "ngage2" && p[2] == "games" && p[4] == "launch" && req.method == "POST")) {

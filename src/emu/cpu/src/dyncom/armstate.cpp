@@ -186,6 +186,12 @@ void ARMul_State::RaiseException(const int type, const std::uint32_t data) {
     core->exception_handler(static_cast<eka2l1::arm::exception_type>(type), data);
 }
 
+void ARMul_State::RaiseHook(const std::uint32_t addr) {
+    if (core->hook_handler) {
+        core->hook_handler(addr);
+    }
+}
+
 void ARMul_State::RaiseSystemCall(std::uint32_t val) {
     core->system_call_handler(val);
 }

@@ -21,6 +21,7 @@
 
 #include <array>
 #include <functional>
+#include <vector>
 #include <memory>
 
 #include <common/types.h>
@@ -61,6 +62,7 @@ namespace eka2l1::arm {
 
     using system_call_handler_func = std::function<void(const std::uint32_t)>;
     using handle_exception_func = std::function<bool(exception_type, const std::uint32_t)>;
+    using hook_func = std::function<void(const std::uint32_t)>;
 
     class core;
 
@@ -118,6 +120,14 @@ namespace eka2l1::arm {
 
         system_call_handler_func system_call_handler;
         handle_exception_func exception_handler;
+
+        /**
+         * Called before the instruction at a hooked address executes, with that
+         * address. The guest code is not modified. The handler may read and
+         * change the registers; if it changes PC, execution continues there
+         * and the hooked instruction is not run.
+         */
+        hook_func hook_handler;
 
         /**
          *  Stores register value and some pointer of the CPU.
@@ -195,6 +205,17 @@ namespace eka2l1::arm {
 
         virtual void clear_instruction_cache() = 0;
         virtual void imb_range(address addr, std::size_t size) = 0;
+
+        /**
+         * Replace the set of hooked addresses (bit 0 is ignored). Unlike a
+         * breakpoint a hook costs nothing per hit beyond the handler call, so
+         * it can sit on a function called thousands of times a frame.
+         *
+         * \returns False if this backend has no hooks.
+         */
+        virtual bool set_hooks(const std::vector<address> &addresses) {
+            return addresses.empty();
+        }
 
         // Informs the core which address space (process) is about to run, so a
         // backend can tag its translation cache per-process instead of throwing

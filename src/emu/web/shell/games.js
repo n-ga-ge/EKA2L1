@@ -114,7 +114,7 @@ const MAX_NOTES = 24;
 // Longest text taken from an entry, in characters; anything longer is cut.
 // The site's catalogue is checked against the same numbers before it is
 // published, so in practice nothing is.
-const LIMITS = { title: 80, action: 120, source: 500, note: 600, menu: 120, multiplayerNote: 400 };
+const LIMITS = { title: 80, action: 120, source: 500, note: 600, menu: 120, multiplayerNote: 400, enhanceNote: 400 };
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -221,10 +221,20 @@ function multiplayerFacts(value) {
   };
 }
 
-// What the catalogue says about a game, for the status line, the guide and
-// the multiplayer dialog: { slug, title, about, status: { label, tone, note }
-// | null, multiplayer }, any of them empty when the entry does not say; null
-// when it is not an entry at all.
+// What an entry's "enhance" says: { engine, beta, note }, where `engine` names
+// the enhancement profile that reads this game's 3D (catalog.js
+// enhanceProfile), `beta` is true until someone has played the game with it
+// and found the picture right, and `note` is what a player should know. null
+// when the entry names no profile.
+function enhanceFacts(value) {
+  if (!isRecord(value) || typeof value.engine !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(value.engine)) return null;
+  return { engine: value.engine, beta: value.status !== 'verified', note: text(value.note, LIMITS.enhanceNote) };
+}
+
+// What the catalogue says about a game, for the status line, the guide, the
+// display and the multiplayer dialog: { slug, title, about, status: { label,
+// tone, note } | null, multiplayer, enhance }, any of them empty when the
+// entry does not say; null when it is not an entry at all.
 export function gameFacts(entry) {
   if (!isRecord(entry)) return null;
   const words = typeof entry.status === 'string' && Object.hasOwn(STATUS_WORDS, entry.status) ? STATUS_WORDS[entry.status] : null;
@@ -233,6 +243,7 @@ export function gameFacts(entry) {
   return {
     slug: typeof entry.slug === 'string' && /^[a-z0-9-]{1,64}$/.test(entry.slug) ? entry.slug : '',
     multiplayer: multiplayerFacts(entry.multiplayer),
+    enhance: enhanceFacts(entry.enhance),
     title: text(entry.title, LIMITS.title),
     about: [text(entry.publisher, 60), year, text(entry.genre, 60)].filter(Boolean).join(' · '),
     status: words ? { label: words.label, tone: words.tone, note: text(entry.statusNote, LIMITS.note) || words.fallback } : null,
