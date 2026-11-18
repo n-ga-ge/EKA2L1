@@ -9,6 +9,7 @@
 #include <common/language.h>
 #include <common/log.h>
 #include <common/path.h>
+#include <common/time.h>
 #include <config/config.h>
 #include <control/native.h>
 #include <control/ngage.h>
@@ -18,6 +19,7 @@
 #include <enhance/enhance.h>
 #include <filesystem>
 #include <kernel/kernel.h>
+#include <kernel/timing.h>
 #include <kernel/process.h>
 #include <kernel/thread.h>
 #include <mutex>
@@ -543,6 +545,23 @@ namespace eka2l1::control {
                 auto res = png(pixels, size.x, size.y, scale / scr->display_scale_factor);
                 res.headers["X-Frame-Count"] = std::to_string(frontend.frames());
                 return res;
+            }
+            if (p == std::vector<std::string>{ "v1", "clock" }) {
+                // The guest's clock. It starts at the host's time; PUT moves it, and it runs on from
+                // there until the kernel is created again. Software whose certificates expired long
+                // ago (N-Gage 2.0) checks them against this clock.
+                auto *kern = sys().get_kernel_system();
+                require(kern != nullptr, "no_device", "no device is booted", 409);
+                if (req.method == "PUT") {
+                    const double unix_ms = required_number(body, "unixMs");
+                    require(unix_ms >= 0 && unix_ms < 253402300800000.0, "bad_request", "unixMs out of range", 400);
+                    const std::uint64_t target = static_cast<std::uint64_t>(unix_ms) * 1000 + common::ad_epoc_dist_microsecs;
+                    kernel_lock guard(kern);
+                    kern->set_base_time(target - kern->get_ntimer()->microseconds());
+                } else
+                    require(req.method == "GET", "not_found", "unknown operation", 404);
+                const std::uint64_t now = kern->universal_time();
+                return response::from_json({ { "unixMs", double((now - common::ad_epoc_dist_microsecs) / 1000) }, { "utcOffset", kern->utc_offset() } });
             }
             if (p == std::vector<std::string>{ "v1", "language" }) {
                 if (req.method == "PUT") {

@@ -66,6 +66,12 @@ API launch can use the same listener. Launches still create EmulatorActivity,
 use its profile and wait for its rendering surface. Ordinary Android launches
 retain their process-exit behavior.
 
+`GET|PUT /v1/clock` reads or sets the guest clock: `{"unixMs": ...}`, Unix
+time in milliseconds. It starts at the host's time and runs on from the value
+set until the kernel is created again. N-Gage 2.0's application checks its
+certificates against it and refuses to install games from 2019 on, so a
+frontend sets a date before that for an N-Gage 2.0 device.
+
 `GET /v1/ngage2/games` opens Games if needed and reads its PlayServer GamesList
 catalogue. `POST /v1/ngage2/games/{uid}/launch` uses the same launch IPC as the
 Games GUI. Both endpoints keep the session attached to Games. The guest IPC
