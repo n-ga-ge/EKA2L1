@@ -146,6 +146,7 @@ out vec4 oColor;
 const int REACH = 3;
 // How far from the key colour a pixel can be that the game mixed with it.
 const int MIXED_REACH = 2;
+const float GREY_WITHIN = 0.08;
 // How much of the key colour makes a pixel one that may be mixed with it.
 const float MIXED_FROM = 0.2;
 
@@ -206,8 +207,13 @@ void main() {
     // key colour: something the game drew over its 3D with transparency (the
     // soft edge of an overlay). The key colour's part of it is where the 3D
     // shows through.
-    bool mixed = false;
-    if (!key && open) {
+    // Inside a translucent overlay there is no pure key colour near by; a
+    // pixel is taken for grey over the key colour there too when what is
+    // left of it without the key colour's share is grey.
+    vec3 rest = here - share * vec3(1.0, 0.0, 1.0);
+    bool mixed = !key && open && share < 0.98
+        && max(abs(rest.r - rest.g), max(abs(rest.b - rest.g), abs(rest.r - rest.b))) < GREY_WITHIN;
+    if (!key && open && !mixed) {
         for (int dy = -MIXED_REACH; dy <= MIXED_REACH && !mixed; dy++) {
             for (int dx = -MIXED_REACH; dx <= MIXED_REACH; dx++) {
                 ivec2 at = cell + ivec2(dx, dy);
