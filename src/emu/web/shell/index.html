@@ -210,7 +210,12 @@
   <dialog id="info">
     <h2>Diagnostics</h2>
     <div id="info-body"></div>
-    <form method="dialog"><button type="submit">Close</button></form>
+    <p class="hint" id="info-note" role="status"></p>
+    <form method="dialog">
+      <button type="button" id="info-copy">Copy report</button>
+      <button type="button" id="info-download">Download report</button>
+      <button type="submit">Close</button>
+    </form>
   </dialog>
 
   <script src="eka2l1_web.js"></script>

@@ -23,6 +23,7 @@
 //   ?cache=<MB>   size bound of the download cache (see loader.js)
 //   ?touch=1|0    force the on-screen controls on or off
 //   ?fps=1        show frames per second in the status line
+//   ?diag=1       show the performance overlay (see diag/hud.js)
 //   ?room=<code>  join that multiplayer room once the game is running (see
 //                 net.js); an invite link is the game's link with this added
 //
@@ -30,6 +31,11 @@
 // origin. loader.js fetches and keeps them; this file installs them.
 
 import { Backdrop } from './backdrop.js';
+import { Diagnostics } from './diag/core.js';
+import { helpLink } from './diag/help.js';
+import { setupHud } from './diag/hud.js';
+import { formatText, redact } from './diag/report.js';
+import { SECTIONS } from './diag/sections.js';
 import { Eka2l1 } from './eka2l1-client.js';
 import { NGAGE_KEYS, STANDARD_PROFILE, keyName, padName } from './games.js';
 import { Input } from './input.js';
@@ -53,6 +59,7 @@ const page = {
   input: null,
   net: null, // the multiplayer Session (net.js), once the emulator is up
   support: null,
+  diag: null, // the Diagnostics object (diag/core.js)
   site: null, // config.json, when the host provides one
   downloads: null, // promise of the download cache (loader.js)
   app: null, // { uid, name } of the running game
@@ -1489,11 +1496,12 @@ function wireControls() {
   entry('m-info', async () => {
     // With the emulator's latest word on the 3D profile, if it comes soon.
     await Promise.race([refreshEnhance(), new Promise((resolve) => setTimeout(resolve, 1000))]);
-    showInfo();
+    page.diag.open();
   });
 
   // Links back to the site this page is part of; a bare player has none.
   siteLinks().then((links) => {
+    page.diag.docs = links.docs;
     for (const [id, url] of [['m-home', links.home], ['m-docs', links.docs]]) {
       if (!url) continue;
       $(id).href = url;
@@ -1543,40 +1551,6 @@ function wireAudio() {
 
 // --- diagnostics ---------------------------------------------------------------
 
-function showInfo() {
-  const support = page.support;
-  const row = (item, optional) => {
-    const mark = item.ok ? '<span class="ok">✓</span>' : optional ? '<span class="warn">–</span>' : '<span class="bad">✗</span>';
-    const detail = item.detail ? `<small>${escapeHtml(item.detail)}</small>` : '';
-    return `<li>${mark}<span>${escapeHtml(item.name)}</span>${detail}</li>`;
-  };
-
-  let html = '';
-  if (support) {
-    html += `<h3>Required</h3><ul>${support.required.map((item) => row(item, false)).join('')}</ul>`;
-    html += `<h3>Optional</h3><ul>${support.optional.map((item) => row(item, true)).join('')}</ul>`;
-    html += `<h3>Device</h3><ul><li><span></span><span>Renderer: ${escapeHtml(support.renderer)} · ${support.cores || '?'} cores`
-      + `${support.memoryGB ? ' · ' + support.memoryGB + ' GB' : ''} · ${support.mobile ? 'mobile' : 'desktop'}</span>`
-      + `<small>${escapeHtml(support.userAgent)}</small></li></ul>`;
-  }
-  if (page.emu) {
-    const stats = page.emu.stats();
-    const surface = page.surface ? ` · canvas ${page.surface.width}×${page.surface.height} (${page.surface.filter})` : '';
-    const enhance = page.enhance;
-    const answer = enhance && enhance.answer;
-    const match = answer ? `${answer.active ? 'matches' : 'does not match'} the game, ` : '';
-    const threeD = !enhance ? '' : ` · 3D profile ${escapeHtml(enhance.engine)}: ` + (enhance.state === 'loading' ? 'loading'
-      : enhance.state === 'failed' ? 'not loaded'
-        : enhance.state === 'missing' ? `${match}this emulator cannot draw it`
-          : `${match}${!answer.scale ? 'off' : `drawn at ${escapeHtml(String(answer.scale))}${typeof answer.scale === 'number' ? '×' : ''}`}`);
-    html += `<h3>Session</h3><ul><li><span></span><span>${Math.round(stats.frames)} frames · ${page.fps.toFixed(1)} fps · heap ${stats.heapMB.toFixed(0)} MB · `
-      + `graphics ${(stats.frames ? stats.graphicsBusyMs / stats.frames : 0).toFixed(2)} ms/frame · gamepads ${page.gamepads}${surface}${threeD}</span></li></ul>`;
-  }
-
-  $('info-body').innerHTML = html;
-  $('info').showModal();
-}
-
 function startFpsReadout() {
   let lastFrames = page.emu.frames();
   let lastTime = performance.now();
@@ -1604,6 +1578,13 @@ async function loadSiteConfig() {
 // --- boot ----------------------------------------------------------------------
 
 async function main() {
+  // Before anything else, so that it sees whatever goes wrong from here on.
+  page.diag = new Diagnostics(page, SECTIONS,
+    { dialog: $('info'), body: $('info-body'), copy: $('info-copy'), download: $('info-download'), note: $('info-note') },
+    { downloadBlob, formatText, redact, helpLink });
+  page.diag.init();
+  setupHud(page.diag, params);
+
   wireControls();
   wireSetup();
 
@@ -1653,6 +1634,7 @@ async function main() {
   wireMultiplayerDialog();
   wireAudio();
   startFpsReadout();
+  page.diag.start();
   refreshControls();
 
   // ?log=<filter> turns emulator logging up, e.g. ?log=*:info or ?log=*:trace.
