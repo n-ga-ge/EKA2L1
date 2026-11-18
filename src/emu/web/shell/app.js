@@ -758,7 +758,8 @@ function applyDisplay() {
 
 // `scale` is what PATCH /v1/enhance takes: 0 switches the enhancement off, a
 // number is that many times the game's own resolution, 'auto' follows the
-// canvas.
+// canvas. Everything else the game shows is drawn at that size too: `flat`
+// says how its menus, text, logos and the 2D over its 3D are enlarged.
 const ENHANCE_SCALES = [
   { id: 'off', scale: 0, label: 'Off' },
   ...[2, 3, 4].map((n) => ({ id: String(n), scale: n, label: `${n}×` })),
@@ -768,6 +769,12 @@ const ENHANCE_SCALES = [
 const ENHANCE_FILTERS = [
   { id: 'nearest', label: 'Sharp', hint: 'Textures keep their own pixels, as the game shows them.' },
   { id: 'linear', label: 'Smooth', hint: 'Textures are blended, which hides their pixels at a larger size.' },
+];
+
+const ENHANCE_FLATS = [
+  { id: 'scaler', label: 'Pixel-art scaler', hint: 'Edges and curves of letters, icons and logos are redrawn smooth (xBRZ), and the 3D shows through the rounded edges of what is over it.' },
+  { id: 'smooth', label: 'Smooth', hint: 'Blended between pixels.' },
+  { id: 'sharp', label: 'Sharp pixels', hint: 'Each pixel of the game a block, as on the phone.' },
 ];
 
 // What the page knows about the running game's enhancement, or null when the
@@ -799,6 +806,7 @@ function enhanceChoice() {
   return {
     scale: ENHANCE_SCALES.find((item) => item.id === settings.display.enhance) || ENHANCE_SCALES[0],
     filter: ENHANCE_FILTERS.find((item) => item.id === settings.display.enhanceFilter) || ENHANCE_FILTERS[0],
+    flat: ENHANCE_FLATS.find((item) => item.id === settings.display.enhanceFlat) || ENHANCE_FLATS[0],
   };
 }
 
@@ -839,7 +847,7 @@ function applyEnhance() {
   if (!page.emu || !page.app || !enhance || !enhance.profile) return;
   const launch = launches;
   const choice = enhanceChoice();
-  const wanted = { scale: choice.scale.scale, filter: choice.filter.id };
+  const wanted = { scale: choice.scale.scale, filter: choice.filter.id, flat: choice.flat.id };
 
   enhanceRequest(async () => {
     if (page.enhance !== enhance || !page.app || launch !== launches) return;
@@ -877,7 +885,8 @@ function applyEnhance() {
     // The same choice need not be said twice, except the one that follows
     // the canvas, whose size may be what changed.
     const { sent } = enhance;
-    if (sent && sent.scale === wanted.scale && sent.filter === wanted.filter && wanted.scale !== 'auto') return;
+    if (sent && sent.scale === wanted.scale && sent.filter === wanted.filter && sent.flat === wanted.flat
+      && wanted.scale !== 'auto') return;
     const patch = await page.emu.request('PATCH', '/v1/enhance', wanted);
     enhance.sent = wanted;
     enhance.answer = patch.ok ? patch.json() : null;
@@ -907,19 +916,22 @@ function renderEnhance() {
   };
   fill($('enhance-select'), ENHANCE_SCALES, choice.scale);
   fill($('enhance-filter-select'), ENHANCE_FILTERS, choice.filter);
+  fill($('enhance-flat-select'), ENHANCE_FLATS, choice.flat);
 
   $('enhance-settings').hidden = !enhance;
   if (!enhance) return;
   $('enhance-beta').hidden = !enhance.beta;
   // The textures only matter while the 3D is drawn again.
   $('enhance-filter-select').disabled = choice.scale.id === 'off';
+  $('enhance-flat-select').disabled = choice.scale.id === 'off';
 
   const { width, height } = page.screen;
-  const flat = 'Menus, text and other flat pictures stay as the game draws them.';
+  const flat = 'Its menus, text and logos are drawn at that size too.';
   $('enhance-hint').textContent = choice.scale.id === 'off' ? `The game draws its 3D itself at ${width}×${height}, as on the phone.`
     : choice.scale.id === 'auto' ? `The game's 3D is drawn again by the graphics card, at the size the picture is shown at. ${flat}`
       : `The game's 3D is drawn again by the graphics card at ${choice.scale.scale} times the size, ${width * choice.scale.scale}×${height * choice.scale.scale}. ${flat}`;
   $('enhance-filter-hint').textContent = choice.scale.id === 'off' ? '' : choice.filter.hint;
+  $('enhance-flat-hint').textContent = choice.scale.id === 'off' ? '' : choice.flat.hint;
 
   $('enhance-note').textContent = [
     enhance.beta ? 'Beta: nobody has played this game through this way yet, so parts of the picture may be missing or wrong.' : '',
@@ -963,11 +975,12 @@ function wireDisplayDialog() {
     settings.display.fill = $('fill-select').value;
     settings.display.enhance = $('enhance-select').value;
     settings.display.enhanceFilter = $('enhance-filter-select').value;
+    settings.display.enhanceFlat = $('enhance-flat-select').value;
     saveSettings();
     applyDisplay();
     renderDisplay();
   };
-  for (const id of ['filter-select', 'resolution-select', 'fill-select', 'enhance-select', 'enhance-filter-select']) {
+  for (const id of ['filter-select', 'resolution-select', 'fill-select', 'enhance-select', 'enhance-filter-select', 'enhance-flat-select']) {
     $(id).addEventListener('change', change);
   }
 

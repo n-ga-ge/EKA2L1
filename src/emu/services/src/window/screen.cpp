@@ -337,6 +337,7 @@ namespace eka2l1::epoc {
         builder.set_texture_filter(dsa_texture, false, filter);
 
         auto draw_area = [&](const eka2l1::rect &source_rect) {
+            framebuffer_drawn.add_rect(source_rect);
             eka2l1::rect dest_rect = source_rect;
             if (rotation_draw != 0.0f) {
                 dest_rect.top = screen_size - source_rect.top;
@@ -349,6 +350,8 @@ namespace eka2l1::epoc {
             draw_area(eka2l1::rect(eka2l1::vec2(0, first), eka2l1::vec2(screen_size.x, end - first)));
         };
 
+        framebuffer_whole = true;
+        framebuffer_drawn.make_empty();
         if (direct_framebuffer_mapped && !(symbian_rects && rect_count)) {
             const auto &rows = direct_framebuffer.written_rows();
             for (int y = 0; y < static_cast<int>(rows.size());) {
@@ -371,6 +374,11 @@ namespace eka2l1::epoc {
             } else {
                 visible_region.add_rect(eka2l1::rect(eka2l1::vec2(0, 0), screen_size));
             }
+
+            common::region hidden;
+            hidden.add_rect(eka2l1::rect(eka2l1::vec2(0, 0), screen_size));
+            hidden.eliminate(visible_region);
+            framebuffer_whole = hidden.empty();
 
             const common::region update_region = explicit_framebuffer_update_region(symbian_rects, rect_count,
                 visible_region, direct_framebuffer_mapped && active_dsa_count_ > 0);

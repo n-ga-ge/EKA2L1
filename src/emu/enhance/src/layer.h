@@ -9,8 +9,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace eka2l1::drivers {
@@ -22,23 +25,48 @@ namespace eka2l1::enhance {
     class engine;
 
     /**
+     * How the layer enlarges the game's flat picture: its menus, text, logos
+     * and the 2D drawn over its 3D.
+     */
+    enum class flat_mode : std::uint8_t {
+        // xBRZ, an edge-directed pixel-art scaler: lines and curves stay
+        // sharp at any scale, and the 3D shows through the rounded edges of
+        // what is drawn over it.
+        scaler,
+        // Blended between pixels.
+        smooth,
+        // Each pixel a block.
+        sharp
+    };
+
+    const char *flat_mode_name(flat_mode mode);
+    bool flat_mode_from_name(const std::string &name, flat_mode &mode);
+
+    /**
      * Draws captured frames with the graphics driver and puts them into the
      * picture a screen shows.
      *
      * It is the capture machine's sink, and the compositor of every screen
-     * while it is switched on. When the guest presents its screen, the screen
-     * texture is drawn again, at the layer's scale, in three steps:
+     * while it is switched on. Every time the guest presents its screen, also
+     * when there is no 3D in it (a menu, a logo), the screen texture is drawn
+     * again at the layer's scale:
      *
-     *  1. where the guest's picture has the key colour, the nearest pixel
-     *     that has not (the game's background under the 3D);
-     *  2. the frame's triangles, only on pixels with the key colour in them;
-     *  3. the guest's picture once more where triangles may have drawn but
-     *     the pixel is not the key colour itself: a pixel the game mixed with
-     *     the key colour, next to pixels in it, lets that much of the
-     *     triangles through (the soft edge of an overlay).
+     *  1. for each pixel of the guest's picture, at its own size, what it
+     *     puts on the screen: its colour, and how much of the 3D under it
+     *     shows through (all of it for the key colour, some for a pixel the
+     *     game mixed with the key colour next to pixels in it, the soft edge
+     *     of an overlay);
+     *  2. where the picture has the key colour, the nearest pixel that has
+     *     not (the game's background under the 3D);
+     *  3. the frame's triangles, only on pixels with the key colour in them
+     *     (with the scaler, and next to them);
+     *  4. the picture of step 1 over everything, enlarged the way `flat_mode`
+     *     says: it covers the triangles as much as step 1 says.
      *
-     * Every other pixel keeps what the screen's own copy put there, so the
-     * window server's drawing over the game stays.
+     * When the game writes the screen's buffer itself, steps 2 to 4 cover only
+     * what that present put on the screen (`epoc::screen::framebuffer_drawn`):
+     * a game that shows its picture through the window server leaves a stale
+     * buffer behind, and windows of the window server may be over part of it.
      *
      * Everything is issued as one command list through
      * `drivers::graphics_command_builder`, the same way the OpenGL ES
@@ -55,6 +83,7 @@ namespace eka2l1::enhance {
          */
         void configure(std::uint32_t scale, bool automatic);
         void set_linear(bool linear);
+        void set_flat(flat_mode mode);
 
         bool enabled();
         // Whether it tried to draw and cannot (no OpenGL, a shader that does
@@ -62,6 +91,7 @@ namespace eka2l1::enhance {
         bool failed();
         bool automatic();
         bool linear();
+        flat_mode flat();
         // The scale the screen texture has while the layer draws; zero when off.
         float scale_in_use();
 
@@ -111,10 +141,9 @@ namespace eka2l1::enhance {
         std::uint32_t scale_ = 0;
         bool automatic_ = false;
         bool linear_ = false;
+        flat_mode flat_ = flat_mode::scaler;
         std::shared_ptr<const frame> shown_;
         float scale_in_use_ = 0;
-        // Presents left for which the screen keeps the layer's scale.
-        std::uint32_t keep_ = 0;
         std::uint64_t composed_ = 0;
         std::uint64_t presents_ = 0;
         std::uint64_t uploads_ = 0;
@@ -126,10 +155,14 @@ namespace eka2l1::enhance {
         drivers::graphics_driver *driver_ = nullptr;
         drivers::handle triangle_program_ = 0;
         drivers::handle compose_program_ = 0;
+        drivers::handle scale_program_ = 0;
         drivers::handle vertex_buffer_ = 0;
         drivers::handle input_layout_ = 0;
-        int texture_loc_ = -1, mode_loc_ = -1, triangle_screen_loc_ = -1, view_loc_ = -1, table_loc_ = -1;
+        int texture_loc_ = -1, mode_loc_ = -1, triangle_screen_loc_ = -1, view_loc_ = -1, table_loc_ = -1, extent_loc_ = -1;
         int screen_loc_ = -1, params_loc_ = -1;
+        int scale_screen_loc_ = -1, scale_payload_loc_ = -1, scale_params_loc_ = -1;
+        int before_loc_ = -1, after_loc_ = -1, options_loc_ = -1;
+        int scale_before_loc_ = -1, scale_after_loc_ = -1, scale_options_loc_ = -1;
         bool resources_failed_ = false;
         std::atomic<bool> broken_{ false };
 
@@ -149,13 +182,36 @@ namespace eka2l1::enhance {
         void drop_textures(drivers::graphics_command_builder *builder);
         void prepare_textures(drivers::graphics_command_builder &builder, const frame &f, bool linear,
             std::vector<drivers::handle> &handles, std::vector<drivers::handle> &tables);
+        // `shown` may be null: the flat picture alone, enlarged.
         bool render(epoc::screen *scr, drivers::graphics_driver *driver, const std::shared_ptr<const frame> &shown, bool linear,
-            bool from_screen = false);
+            flat_mode flat, bool from_screen = false, const std::optional<eka2l1::rect> &clip = std::nullopt);
         bool compose_picture(epoc::screen *scr, drivers::graphics_driver *driver, bool from_screen);
+        // Steps 2 and 3 of a frame with triangles, into the bound screen
+        // texture. `picture_pass` draws the compose shader's pass it is given.
+        void draw_triangles(drivers::graphics_command_builder &builder, const frame &f, const std::vector<drivers::handle> &textures,
+            const std::vector<drivers::handle> &tables, drivers::handle picture, eka2l1::vec2 picture_size, const float *view,
+            bool linear, bool scaler, bool own_picture, bool depth_used, const std::function<void(float)> &picture_pass);
 
         // A 1x copy of the screen texture, the picture when the guest shows
         // its frames through the window server.
         drivers::handle screen_copy_ = 0;
         eka2l1::vec2 screen_copy_size_;
+
+        // What each pixel of the guest's picture puts on the screen (step 1
+        // above): premultiplied colour, and in alpha how much of the 3D shows.
+        drivers::handle payload_ = 0;
+        eka2l1::vec2 payload_size_;
+
+        // A game that shows its picture through the window server has it drawn
+        // into the screen texture, where the window server draws only what
+        // the game drew since the last time; the rest is the layer's own
+        // picture from then. The screen texture as the layer found it
+        // (`before_`) and as it left it the last time (`after_`): the pixels
+        // that are the same in both are left alone, so the layer does not
+        // take its own picture for the game's.
+        drivers::handle before_ = 0, after_ = 0;
+        eka2l1::vec2 copies_size_;
+        bool after_valid_ = false;
+        bool through_server_ = false;
     };
 }

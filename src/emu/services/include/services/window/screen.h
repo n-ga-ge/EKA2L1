@@ -176,6 +176,13 @@ namespace eka2l1::epoc {
         // Null, or what draws the screen texture when the guest presents. Set
         // from another thread than the one that presents.
         std::atomic<screen_compositor *> compositor{ nullptr };
+        // What the guest's last framebuffer present drew of its buffer onto
+        // the screen texture, in screen pixels at a scale of one (nothing when
+        // the game did not write its buffer), and whether that was free of
+        // windows of the window server over a direct screen access. A
+        // compositor redraws only that much, and leaves those windows be.
+        common::region framebuffer_drawn;
+        bool framebuffer_whole = true;
 
         bool direct_framebuffer_mapped = false;
         framebuffer_observer direct_framebuffer;

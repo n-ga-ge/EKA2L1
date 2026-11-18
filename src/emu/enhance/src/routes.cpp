@@ -268,6 +268,7 @@ namespace eka2l1::enhance {
             { "active", active }, { "replace", replace_ },
             { "scale", scale_json }, { "auto", layer_ && layer_->automatic() },
             { "filter", (layer_ && layer_->linear()) ? "linear" : "nearest" },
+            { "flat", flat_mode_name(layer_ ? layer_->flat() : flat_mode::scaler) },
             { "composed", static_cast<std::int64_t>(layer_ ? layer_->composed() : 0) },
             { "presents", static_cast<std::int64_t>(layer_ ? layer_->presents() : 0) },
             { "cachedTextures", static_cast<std::int64_t>(layer_ ? layer_->cached_textures() : 0) },
@@ -531,6 +532,11 @@ namespace eka2l1::enhance {
                 throw api_error(400, "bad_request", "`filter` must be \"nearest\" or \"linear\"");
             }
 
+            flat_mode flat = flat_mode::scaler;
+            if (!body["flat"].is_null() && !flat_mode_from_name(body["flat"].string(), flat)) {
+                throw api_error(400, "bad_request", "`flat` must be \"scaler\", \"smooth\" or \"sharp\"");
+            }
+
             kernel_lock guard(kern());
 
             layer *drawing = nullptr;
@@ -543,7 +549,7 @@ namespace eka2l1::enhance {
                 if (!body["replace"].is_null()) {
                     replace_ = body["replace"].boolean();
                 }
-                if (!wanted.is_null() || !body["filter"].is_null()) {
+                if (!wanted.is_null() || !body["filter"].is_null() || !body["flat"].is_null()) {
                     drawing = &the_layer();
                 }
             }
@@ -552,6 +558,9 @@ namespace eka2l1::enhance {
             // on the guest's thread takes them in the other order.
             if (drawing && !body["filter"].is_null()) {
                 drawing->set_linear(filter == "linear");
+            }
+            if (drawing && !body["flat"].is_null()) {
+                drawing->set_flat(flat);
             }
             if (drawing && !wanted.is_null()) {
                 drawing->configure(scale, automatic);

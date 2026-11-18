@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "layer.h"
 #include "engine.h"
+#include "xbrz.h"
 
 #include <common/log.h>
 #include <config/config.h>
@@ -14,6 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
+#include <optional>
 #include <string>
 
 namespace eka2l1::enhance {
@@ -30,10 +33,6 @@ namespace eka2l1::enhance {
     static constexpr std::size_t HASH_BYTES_A_PICTURE = 768 * 1024;
 
     static constexpr float MAX_AUTOMATIC_SCALE = 8.0f;
-    // The screen keeps the layer's scale for this many presents without a
-    // pixel in the key colour, so that a picture without 3D now and then does
-    // not resize the screen texture twice.
-    static constexpr std::uint32_t PRESENTS_KEPT = 30;
 
     static const char *SHADER_HEADER_ES = "#version 300 es\n"
                                           "precision highp float;\n"
@@ -75,6 +74,10 @@ uniform sampler2D uTable;
 uniform vec4 uMode;
 // x, y: screen pixels to a pixel of the picture.
 uniform vec4 uView;
+// x, y: the picture's size in pixels; z: one to draw also on the pixels next
+// to those with the key colour in them, where the scaler may round off the
+// edge of what is over the 3D.
+uniform vec4 uExtent;
 
 in vec2 vTexCoord;
 in vec4 vColor;
@@ -106,10 +109,27 @@ vec4 tableColor() {
     return mix(top, bottom, part.y);
 }
 
+bool open(ivec2 at, ivec2 last) {
+    vec3 under = texelFetch(uScreen, clamp(at, ivec2(0), last), 0).rgb;
+    return clamp(min(under.r, under.b) - under.g, 0.0, 1.0) >= 0.2;
+}
+
 void main() {
-    ivec2 last = textureSize(uScreen, 0) - ivec2(1);
-    vec3 under = texelFetch(uScreen, clamp(ivec2(floor(gl_FragCoord.xy / uView.xy)), ivec2(0), last), 0).rgb;
-    if (clamp(min(under.r, under.b) - under.g, 0.0, 1.0) < 0.2) {
+    ivec2 last = ivec2(uExtent.xy) - ivec2(1);
+    ivec2 cell = clamp(ivec2(floor(gl_FragCoord.xy / uView.xy)), ivec2(0), last);
+    bool drawn = open(cell, last);
+    if (!drawn && uExtent.z > 0.5) {
+        for (int dy = -1; dy <= 1 && !drawn; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (open(cell + ivec2(dx, dy), last)) {
+                    drawn = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!drawn) {
         discard;
     }
 
@@ -133,9 +153,17 @@ uniform sampler2D uScreen;
 // x: the pass. Zero: under the triangles, where they may be drawn and where
 // a smoothed pixel takes from such a pixel (everything else is the plain copy
 // the screen made already). Two: the same, but everywhere (a test frame's own
-// picture, which the screen did not copy). One: over the triangles.
+// picture, which the screen did not copy). Three: the picture over the
+// triangles and everything else. Four: what each pixel puts on the screen,
+// at the picture's own size, for the scaler (see layer.h).
 // y: one to smooth the picture between its pixels; z, w: its size in pixels.
 uniform vec4 uParams;
+// The screen texture as it was before this picture, and as the layer left it
+// after the one before: a pixel that is the same in both was not drawn by the
+// window server since, and is left alone (x one) by pass three.
+uniform sampler2D uBefore;
+uniform sampler2D uAfter;
+uniform vec4 uOptions;
 
 in vec2 vTexCoord;
 in vec4 vColor;
@@ -162,6 +190,11 @@ float keyShare(vec3 c) {
 }
 
 ivec2 last;
+
+bool unchanged() {
+    ivec2 at = ivec2(gl_FragCoord.xy);
+    return texelFetch(uBefore, at, 0) == texelFetch(uAfter, at, 0);
+}
 
 vec3 pixel(ivec2 at) {
     return texelFetch(uScreen, clamp(at, ivec2(0), last), 0).rgb;
@@ -225,14 +258,28 @@ void main() {
         }
     }
 
-    if (uParams.x > 0.5 && uParams.x < 1.5) {
+    if (uParams.x > 3.5) {
+        // Premultiplied, and how much of the 3D shows through.
+        if (key) {
+            oColor = vec4(0.0, 0.0, 0.0, 1.0);
+        } else if (mixed) {
+            oColor = vec4(max(rest, vec3(0.0)), share);
+        } else {
+            oColor = vec4(here, 0.0);
+        }
+        return;
+    }
+
+    if (uParams.x > 2.5) {
         // Over the triangles, drawn with a blend that keeps `alpha` of what
-        // is there and adds this colour. Only where triangles may have drawn.
-        if (key || !open) {
+        // is there and adds this colour.
+        if (key || (uOptions.x > 0.5 && unchanged())) {
             discard;
         }
 
-        if (mixed) {
+        if (!open) {
+            oColor = vec4(picture(here), 0.0);
+        } else if (mixed) {
             oColor = vec4(max(here - share * vec3(1.0, 0.0, 1.0), vec3(0.0)), share);
         } else {
             oColor = vec4(picture(here), 0.0);
@@ -366,6 +413,27 @@ void main() {
         return false;
     }
 
+    const char *flat_mode_name(const flat_mode mode) {
+        switch (mode) {
+        case flat_mode::smooth:
+            return "smooth";
+        case flat_mode::sharp:
+            return "sharp";
+        default:
+            return "scaler";
+        }
+    }
+
+    bool flat_mode_from_name(const std::string &name, flat_mode &mode) {
+        for (const flat_mode one : { flat_mode::scaler, flat_mode::smooth, flat_mode::sharp }) {
+            if (name == flat_mode_name(one)) {
+                mode = one;
+                return true;
+            }
+        }
+        return false;
+    }
+
     layer::layer(system *sys, engine &owner)
         : sys_(sys)
         , engine_(owner) {
@@ -392,6 +460,16 @@ void main() {
     bool layer::linear() {
         const std::lock_guard<std::mutex> guard(lock_);
         return linear_;
+    }
+
+    flat_mode layer::flat() {
+        const std::lock_guard<std::mutex> guard(lock_);
+        return flat_;
+    }
+
+    void layer::set_flat(const flat_mode mode) {
+        const std::lock_guard<std::mutex> guard(lock_);
+        flat_ = mode;
     }
 
     float layer::scale_in_use() {
@@ -450,7 +528,6 @@ void main() {
 
             if (!on) {
                 shown_.reset();
-                keep_ = 0;
                 scale_in_use_ = 0;
             } else if (!automatic_) {
                 scale_in_use_ = static_cast<float>(scale_);
@@ -491,7 +568,6 @@ void main() {
         const std::lock_guard<std::mutex> guard(lock_);
         if (!completed) {
             shown_.reset();
-            keep_ = 0;
         } else if (wanted() && !completed->draws.empty()) {
             // A frame without triangles (a menu, or a pause over the last
             // picture) leaves the one before it in place: if the guest's
@@ -503,7 +579,9 @@ void main() {
 
     float layer::screen_scale(epoc::screen *scr, const float usual) {
         const std::lock_guard<std::mutex> guard(lock_);
-        if (!wanted() || !shown_ || !keep_) {
+        // The flat picture is enlarged too, so the screen keeps the layer's
+        // scale also while there is no 3D in it.
+        if (!wanted()) {
             return usual;
         }
 
@@ -540,10 +618,12 @@ void main() {
 
         std::shared_ptr<const frame> shown;
         bool linear = false;
+        flat_mode flat = flat_mode::scaler;
         {
             const std::lock_guard<std::mutex> guard(lock_);
             shown = shown_;
             linear = linear_;
+            flat = flat_;
         }
 
         if (scr->is_framebuffer_upside_down()) {
@@ -552,26 +632,32 @@ void main() {
             return false;
         }
 
-        if (!shown) {
-            return false;
-        }
-
-        // Without a pixel in the key colour nothing of the frame would show,
-        // and the plain copy of the picture is right as it is.
+        // Without a pixel in the key colour nothing of the frame would show:
+        // only the flat picture is drawn.
         // Through the window server the guest's picture is a bitmap of its own,
         // not the screen's framebuffer, and is not looked for here: the
         // triangles go only where the screen texture has the key colour.
-        const bool has_key = !shown->screen_pixels.empty() || from_screen || picture_has_key(scr);
-        {
-            const std::lock_guard<std::mutex> guard(lock_);
-            if (has_key) {
-                keep_ = PRESENTS_KEPT;
-            } else if (keep_) {
-                keep_--;
+        const bool has_key = shown && (!shown->screen_pixels.empty() || from_screen || picture_has_key(scr));
+
+        // The game's own buffer is redrawn only as far as this present put it
+        // on the screen: nothing of it when the game shows its picture through
+        // the window server, and around windows of the window server over it.
+        std::optional<eka2l1::rect> clip;
+        if (!from_screen && !(shown && !shown->screen_pixels.empty())) {
+            const common::region &drawn = scr->framebuffer_drawn;
+            if (drawn.empty() || (!scr->framebuffer_whole && drawn.rects_.size() > 1)) {
+                return false;
             }
+
+            eka2l1::vec2 from = drawn.rects_[0].top, to = drawn.rects_[0].top + drawn.rects_[0].size;
+            for (const eka2l1::rect &one : drawn.rects_) {
+                from = eka2l1::vec2(std::min(from.x, one.top.x), std::min(from.y, one.top.y));
+                to = eka2l1::vec2(std::max(to.x, one.top.x + one.size.x), std::max(to.y, one.top.y + one.size.y));
+            }
+            clip = eka2l1::rect(from, to - from);
         }
 
-        return has_key && render(scr, driver, shown, linear, from_screen);
+        return render(scr, driver, has_key ? shown : nullptr, linear, flat, from_screen, clip);
     }
 
     void layer::inject(const std::shared_ptr<const frame> &injected) {
@@ -582,7 +668,6 @@ void main() {
             }
 
             shown_ = injected;
-            keep_ = PRESENTS_KEPT;
         }
 
         window_server *server = window_server_of(sys_);
@@ -592,9 +677,11 @@ void main() {
         }
 
         bool linear = false;
+        flat_mode flat = flat_mode::scaler;
         {
             const std::lock_guard<std::mutex> guard(lock_);
             linear = linear_;
+            flat = flat_;
         }
 
         // The guest may be paused or showing a still picture: draw now, with
@@ -605,7 +692,7 @@ void main() {
             }
 
             scr->set_native_scale_factor(driver, scr->logic_scale_factor_x, scr->logic_scale_factor_y);
-            if (render(scr, driver, injected, linear)) {
+            if (render(scr, driver, injected, linear, flat)) {
                 scr->fire_screen_redraw_callbacks(true);
             }
         }
@@ -615,8 +702,11 @@ void main() {
         if (driver != driver_) {
             // Another driver: what was made with the old one went with it.
             driver_ = driver;
-            triangle_program_ = compose_program_ = vertex_buffer_ = input_layout_ = 0;
+            triangle_program_ = compose_program_ = scale_program_ = vertex_buffer_ = input_layout_ = 0;
             screen_copy_ = 0;
+            payload_ = 0;
+            before_ = after_ = 0;
+            after_valid_ = false;
             screen_texture_ = 0;
             cache_.clear();
             cache_bytes_ = 0;
@@ -624,7 +714,7 @@ void main() {
             broken_ = false;
         }
 
-        if (triangle_program_ && compose_program_ && vertex_buffer_ && input_layout_) {
+        if (triangle_program_ && compose_program_ && scale_program_ && vertex_buffer_ && input_layout_) {
             return true;
         }
 
@@ -656,17 +746,20 @@ void main() {
         const drivers::handle vertex = module_of(VERTEX_SHADER, drivers::shader_module_type::vertex, "vertex");
         const drivers::handle triangle = module_of(TRIANGLE_SHADER, drivers::shader_module_type::fragment, "triangle");
         const drivers::handle compose = module_of(COMPOSE_SHADER, drivers::shader_module_type::fragment, "compose");
-        if (!vertex || !triangle || !compose) {
+        const drivers::handle scaler = module_of(SCALE_SHADER, drivers::shader_module_type::fragment, "scaler");
+        if (!vertex || !triangle || !compose || !scaler) {
             return false;
         }
 
-        drivers::shader_program_metadata triangle_meta(nullptr), compose_meta(nullptr);
+        drivers::shader_program_metadata triangle_meta(nullptr), compose_meta(nullptr), scale_meta(nullptr);
         std::string log;
         triangle_program_ = drivers::create_shader_program(driver, vertex, triangle, &triangle_meta, &log);
         compose_program_ = drivers::create_shader_program(driver, vertex, compose, &compose_meta, &log);
-        if (!triangle_program_ || !compose_program_ || !triangle_meta.is_available() || !compose_meta.is_available()) {
+        scale_program_ = drivers::create_shader_program(driver, vertex, scaler, &scale_meta, &log);
+        if (!triangle_program_ || !compose_program_ || !scale_program_ || !triangle_meta.is_available() || !compose_meta.is_available()
+            || !scale_meta.is_available()) {
             LOG_ERROR(SERVICE_WINDOW, "The enhancement layer's shaders do not link: {}", log);
-            triangle_program_ = compose_program_ = 0;
+            triangle_program_ = compose_program_ = scale_program_ = 0;
             return false;
         }
 
@@ -677,6 +770,16 @@ void main() {
         table_loc_ = triangle_meta.get_uniform_binding("uTable");
         screen_loc_ = compose_meta.get_uniform_binding("uScreen");
         params_loc_ = compose_meta.get_uniform_binding("uParams");
+        extent_loc_ = triangle_meta.get_uniform_binding("uExtent");
+        scale_screen_loc_ = scale_meta.get_uniform_binding("uScreen");
+        scale_payload_loc_ = scale_meta.get_uniform_binding("uPayload");
+        scale_params_loc_ = scale_meta.get_uniform_binding("uParams");
+        before_loc_ = compose_meta.get_uniform_binding("uBefore");
+        after_loc_ = compose_meta.get_uniform_binding("uAfter");
+        options_loc_ = compose_meta.get_uniform_binding("uOptions");
+        scale_before_loc_ = scale_meta.get_uniform_binding("uBefore");
+        scale_after_loc_ = scale_meta.get_uniform_binding("uAfter");
+        scale_options_loc_ = scale_meta.get_uniform_binding("uOptions");
 
         drivers::input_descriptor layout[4] = {};
         layout[0].location = 0;
@@ -726,9 +829,22 @@ void main() {
             if (screen_copy_) {
                 builder->destroy_bitmap(screen_copy_);
             }
+
+            if (payload_) {
+                builder->destroy_bitmap(payload_);
+            }
+
+            for (const drivers::handle copy : { before_, after_ }) {
+                if (copy) {
+                    builder->destroy_bitmap(copy);
+                }
+            }
         }
 
         screen_copy_ = 0;
+        payload_ = 0;
+        before_ = after_ = 0;
+        after_valid_ = false;
         cache_.clear();
         cache_bytes_ = 0;
         screen_texture_ = 0;
@@ -990,12 +1106,15 @@ void main() {
     }
 
     bool layer::render(epoc::screen *scr, drivers::graphics_driver *driver, const std::shared_ptr<const frame> &shown, const bool linear,
-        const bool from_screen) {
+        const flat_mode flat, const bool from_screen, const std::optional<eka2l1::rect> &clip) {
         if (!driver || !scr->screen_texture || !ensure_resources(driver)) {
             return false;
         }
 
-        const frame &f = *shown;
+        // Without a frame, the flat picture alone.
+        static const frame no_frame;
+        const frame &f = shown ? *shown : no_frame;
+        const bool with_triangles = shown && f.width && f.height;
         pass_++;
 
         drivers::graphics_command_builder builder;
@@ -1004,6 +1123,9 @@ void main() {
         // injected frame brought.
         drivers::handle picture = scr->dsa_texture;
         eka2l1::vec2 picture_size = scr->current_mode().size;
+        // Whether pixels the window server did not draw since the last picture
+        // are left alone.
+        bool compare = false;
 
         if (from_screen && f.screen_pixels.empty()) {
             // The window server drew the guest's bitmap into the screen
@@ -1032,6 +1154,28 @@ void main() {
             builder.draw_bitmap(scr->screen_texture, 0, eka2l1::rect(eka2l1::vec2(0, 0), picture_size),
                 eka2l1::rect(eka2l1::vec2(0, 0), scaled), eka2l1::vec2(0, 0), 0.0f, 0);
             picture = screen_copy_;
+
+            // And the screen texture as it is, at its size.
+            through_server_ = true;
+            if (!before_ || !after_ || copies_size_ != scaled) {
+                for (drivers::handle *copy : { &before_, &after_ }) {
+                    if (*copy) {
+                        builder.destroy_bitmap(*copy);
+                    }
+                    *copy = drivers::create_bitmap(driver, scaled, 32);
+                }
+                copies_size_ = scaled;
+                after_valid_ = false;
+            }
+
+            if (!before_ || !after_) {
+                return false;
+            }
+
+            builder.bind_bitmap(before_);
+            builder.draw_bitmap(scr->screen_texture, 0, eka2l1::rect(eka2l1::vec2(0, 0), scaled),
+                eka2l1::rect(eka2l1::vec2(0, 0), scaled), eka2l1::vec2(0, 0), 0.0f, 0);
+            compare = after_valid_;
         }
 
         if (!f.screen_pixels.empty()) {
@@ -1061,12 +1205,14 @@ void main() {
             screen_texture_ = 0;
         }
 
-        if (!picture || picture_size.x <= 0 || picture_size.y <= 0 || !f.width || !f.height) {
+        if (!picture || picture_size.x <= 0 || picture_size.y <= 0) {
             return false;
         }
 
         std::vector<drivers::handle> textures, tables;
-        prepare_textures(builder, f, linear, textures, tables);
+        if (with_triangles) {
+            prepare_textures(builder, f, linear, textures, tables);
+        }
 
         // Depth as the engine has it, brought into the depth buffer's range.
         // Only its order matters.
@@ -1118,7 +1264,7 @@ void main() {
 
         const float fw = static_cast<float>(f.width), fh = static_cast<float>(f.height);
         for (const draw &d : f.draws) {
-            if (std::size_t(d.first_vertex) + d.vertex_count > f.vertices.size()) {
+            if (!with_triangles || std::size_t(d.first_vertex) + d.vertex_count > f.vertices.size()) {
                 continue;
             }
 
@@ -1152,6 +1298,49 @@ void main() {
         builder.recreate_buffer(vertex_buffer_, vertex_data_.data(), vertex_data_.size(),
             static_cast<drivers::buffer_upload_hint>(drivers::buffer_upload_dynamic | drivers::buffer_upload_draw));
 
+        const bool smooth = flat == flat_mode::smooth;
+        const bool scaler = flat == flat_mode::scaler;
+        const bool own_picture = !f.screen_pixels.empty();
+        const eka2l1::vec2 target_size = scr->current_mode().size * scr->display_scale_factor;
+        const float view[4] = { static_cast<float>(target_size.x) / pw, static_cast<float>(target_size.y) / ph, 0.0f, 0.0f };
+
+        auto picture_pass = [&](const float pass) {
+            const float params[4] = { pass, smooth ? 1.0f : 0.0f, pw, ph };
+            builder.use_program(compose_program_);
+            builder.bind_texture(picture, 0);
+            builder.set_texture_for_shader(0, screen_loc_, drivers::shader_module_type::fragment);
+            builder.set_dynamic_uniform(params_loc_, drivers::shader_var_type::vec4, params, sizeof(params));
+            builder.draw_arrays(drivers::graphics_primitive_mode::triangles, 0, QUAD_VERTICES, 0);
+        };
+
+        drivers::handle buffers[1] = { vertex_buffer_ };
+        builder.set_vertex_buffers(buffers, 0, 1);
+        builder.bind_input_descriptors(input_layout_);
+
+        if (scaler) {
+            // Step 1 (see layer.h), at the picture's own size.
+            if (!payload_ || payload_size_ != picture_size) {
+                if (payload_) {
+                    builder.destroy_bitmap(payload_);
+                }
+                payload_ = drivers::create_bitmap(driver, picture_size, 32);
+                payload_size_ = picture_size;
+            }
+
+            if (!payload_) {
+                return false;
+            }
+
+            builder.bind_bitmap(payload_);
+            builder.set_feature(drivers::graphics_feature::clipping, false);
+            builder.set_feature(drivers::graphics_feature::cull, false);
+            builder.set_feature(drivers::graphics_feature::stencil_test, false);
+            builder.set_feature(drivers::graphics_feature::depth_test, false);
+            builder.set_feature(drivers::graphics_feature::blend, false);
+            builder.set_color_mask(0b1111);
+            picture_pass(4.0f);
+        }
+
         builder.bind_bitmap(scr->screen_texture);
         builder.set_feature(drivers::graphics_feature::clipping, false);
         builder.set_feature(drivers::graphics_feature::cull, false);
@@ -1160,33 +1349,106 @@ void main() {
         builder.set_feature(drivers::graphics_feature::blend, false);
         builder.set_color_mask(0b1111);
 
-        drivers::handle buffers[1] = { vertex_buffer_ };
-        builder.set_vertex_buffers(buffers, 0, 1);
-        builder.bind_input_descriptors(input_layout_);
+        if (clip) {
+            // Whole screen pixels around the guest pixels in it.
+            const float scale = scr->display_scale_factor;
+            const int left = static_cast<int>(std::floor(clip->top.x * scale));
+            const int top = static_cast<int>(std::floor(clip->top.y * scale));
+            const int right = static_cast<int>(std::ceil((clip->top.x + clip->size.x) * scale));
+            const int bottom = static_cast<int>(std::ceil((clip->top.y + clip->size.y) * scale));
+            builder.set_feature(drivers::graphics_feature::clipping, true);
+            builder.clip_bitmap_rect(eka2l1::rect(eka2l1::vec2(left, top), eka2l1::vec2(right - left, bottom - top)));
+        }
 
-        // The 2D picture is smoothed as the plain copy would be.
-        const bool smooth = !sys_->get_config()->nearest_neighbor_filtering;
-        const bool own_picture = !f.screen_pixels.empty();
-        auto picture_pass = [&](const bool over) {
-            const float params[4] = { over ? 1.0f : (own_picture ? 2.0f : 0.0f), smooth ? 1.0f : 0.0f, pw, ph };
+        if (with_triangles) {
+            draw_triangles(builder, f, textures, tables, picture, picture_size, view, linear, scaler, own_picture, depth_used, picture_pass);
+        }
+
+        // The picture over the triangles adds itself to as much of them as
+        // its alpha says: none for a pixel of the picture, some for one the
+        // game mixed with the key colour.
+        builder.set_color_mask(0b0111);
+        builder.set_feature(drivers::graphics_feature::blend, true);
+        builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
+            drivers::blend_factor::one, drivers::blend_factor::frag_out_alpha,
+            drivers::blend_factor::zero, drivers::blend_factor::one);
+
+        // Before and after, or the picture for both when nothing is compared
+        // (a texture must be bound all the same).
+        compare = compare && !own_picture;
+        builder.bind_texture(compare ? before_ : picture, 2);
+        builder.bind_texture(compare ? after_ : picture, 3);
+        const float options[4] = { compare ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+
+        if (scaler) {
+            const float params[4] = { view[0], view[1], pw, ph };
+            builder.use_program(scale_program_);
+            builder.bind_texture(picture, 0);
+            builder.bind_texture(payload_, 1);
+            builder.set_texture_for_shader(0, scale_screen_loc_, drivers::shader_module_type::fragment);
+            builder.set_texture_for_shader(1, scale_payload_loc_, drivers::shader_module_type::fragment);
+            builder.set_texture_for_shader(2, scale_before_loc_, drivers::shader_module_type::fragment);
+            builder.set_texture_for_shader(3, scale_after_loc_, drivers::shader_module_type::fragment);
+            builder.set_dynamic_uniform(scale_params_loc_, drivers::shader_var_type::vec4, params, sizeof(params));
+            builder.set_dynamic_uniform(scale_options_loc_, drivers::shader_var_type::vec4, options, sizeof(options));
+            builder.draw_arrays(drivers::graphics_primitive_mode::triangles, 0, QUAD_VERTICES, 0);
+        } else {
+            const float params[4] = { 3.0f, smooth ? 1.0f : 0.0f, pw, ph };
             builder.use_program(compose_program_);
             builder.bind_texture(picture, 0);
             builder.set_texture_for_shader(0, screen_loc_, drivers::shader_module_type::fragment);
+            builder.set_texture_for_shader(2, before_loc_, drivers::shader_module_type::fragment);
+            builder.set_texture_for_shader(3, after_loc_, drivers::shader_module_type::fragment);
             builder.set_dynamic_uniform(params_loc_, drivers::shader_var_type::vec4, params, sizeof(params));
+            builder.set_dynamic_uniform(options_loc_, drivers::shader_var_type::vec4, options, sizeof(options));
             builder.draw_arrays(drivers::graphics_primitive_mode::triangles, 0, QUAD_VERTICES, 0);
-        };
+        }
 
-        picture_pass(false);
+        // Leave the blend as the window server sets it for its own drawing.
+        builder.set_feature(drivers::graphics_feature::clipping, false);
+        builder.set_feature(drivers::graphics_feature::blend, false);
+        builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
+            drivers::blend_factor::frag_out_alpha, drivers::blend_factor::one_minus_frag_out_alpha,
+            drivers::blend_factor::one, drivers::blend_factor::one);
+        builder.set_color_mask(0b1111);
 
-        // The triangles. Alpha is left alone: the screen texture is opaque.
-        const eka2l1::vec2 target_size = scr->current_mode().size * scr->display_scale_factor;
-        const float view[4] = { static_cast<float>(target_size.x) / pw, static_cast<float>(target_size.y) / ph, 0.0f, 0.0f };
+        if (through_server_ && after_ && copies_size_ == eka2l1::vec2(static_cast<int>(picture_size.x * scr->display_scale_factor),
+                static_cast<int>(picture_size.y * scr->display_scale_factor))) {
+            // What the layer leaves, for the next picture through the window server.
+            builder.bind_bitmap(after_);
+            builder.set_texture_filter(scr->screen_texture, true, drivers::filter_option::nearest);
+            builder.set_texture_filter(scr->screen_texture, false, drivers::filter_option::nearest);
+            builder.draw_bitmap(scr->screen_texture, 0, eka2l1::rect(eka2l1::vec2(0, 0), copies_size_),
+                eka2l1::rect(eka2l1::vec2(0, 0), copies_size_), eka2l1::vec2(0, 0), 0.0f, 0);
+            after_valid_ = true;
+        }
+
+        builder.bind_bitmap(0);
+
+        drivers::command_list list = builder.retrieve_command_list();
+        driver->submit_command_list(list);
+
+        const std::lock_guard<std::mutex> guard(lock_);
+        composed_++;
+        return true;
+    }
+
+    void layer::draw_triangles(drivers::graphics_command_builder &builder, const frame &f, const std::vector<drivers::handle> &textures,
+        const std::vector<drivers::handle> &tables, const drivers::handle picture, const eka2l1::vec2 picture_size, const float *view,
+        const bool linear, const bool scaler, const bool own_picture, const bool depth_used,
+        const std::function<void(float)> &picture_pass) {
+        // Step 2: under the triangles.
+        picture_pass(own_picture ? 2.0f : 0.0f);
+
+        // Step 3, the triangles. Alpha is left alone: the screen texture is opaque.
+        const float extent[4] = { static_cast<float>(picture_size.x), static_cast<float>(picture_size.y), scaler ? 1.0f : 0.0f, 0.0f };
         builder.use_program(triangle_program_);
         builder.bind_texture(picture, 1);
         builder.set_texture_for_shader(0, texture_loc_, drivers::shader_module_type::fragment);
         builder.set_texture_for_shader(1, triangle_screen_loc_, drivers::shader_module_type::fragment);
         builder.set_texture_for_shader(2, table_loc_, drivers::shader_module_type::fragment);
-        builder.set_dynamic_uniform(view_loc_, drivers::shader_var_type::vec4, view, sizeof(view));
+        builder.set_dynamic_uniform(view_loc_, drivers::shader_var_type::vec4, view, 4 * sizeof(float));
+        builder.set_dynamic_uniform(extent_loc_, drivers::shader_var_type::vec4, extent, sizeof(extent));
         builder.set_color_mask(0b0111);
 
         if (depth_used) {
@@ -1301,31 +1563,6 @@ void main() {
 
         builder.set_feature(drivers::graphics_feature::depth_test, false);
         builder.set_depth_pass_condition(drivers::condition_func::less);
-
-        // The picture over the triangles adds itself to as much of them as
-        // its alpha says: none for a pixel of the picture, some for one the
-        // game mixed with the key colour.
-        builder.set_feature(drivers::graphics_feature::blend, true);
-        builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
-            drivers::blend_factor::one, drivers::blend_factor::frag_out_alpha,
-            drivers::blend_factor::zero, drivers::blend_factor::one);
-
-        picture_pass(true);
-
-        // Leave the blend as the window server sets it for its own drawing.
-        builder.set_feature(drivers::graphics_feature::blend, false);
-        builder.blend_formula(drivers::blend_equation::add, drivers::blend_equation::add,
-            drivers::blend_factor::frag_out_alpha, drivers::blend_factor::one_minus_frag_out_alpha,
-            drivers::blend_factor::one, drivers::blend_factor::one);
-        builder.set_color_mask(0b1111);
-        builder.bind_bitmap(0);
-
-        drivers::command_list list = builder.retrieve_command_list();
-        driver->submit_command_list(list);
-
-        const std::lock_guard<std::mutex> guard(lock_);
-        composed_++;
-        return true;
     }
 
     engine::~engine() = default;

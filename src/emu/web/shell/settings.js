@@ -23,6 +23,9 @@ const DEFAULTS = {
     enhance: 'off',
     // How textures are sampled there: 'nearest' or 'linear'.
     enhanceFilter: 'nearest',
+    // How the game's flat picture (menus, text, logos, what it draws over
+    // its 3D) is enlarged with it: 'scaler', 'smooth' or 'sharp'.
+    enhanceFlat: 'scaler',
   },
   // 'auto' picks the running game's profile when there is one.
   profile: 'auto',

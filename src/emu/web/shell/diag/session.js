@@ -19,7 +19,7 @@ function enhanceState(enhance) {
   if (enhance.state === 'missing') return { value: 'not available in this emulator', note: `Profile ${enhance.engine}${match ? ', ' + match : ''}.` };
   const scale = answer && answer.scale;
   return {
-    value: !scale ? 'off' : `drawn at ${scale}${typeof scale === 'number' ? '×' : ''}`,
+    value: !scale ? 'off' : `drawn at ${typeof scale === 'number' ? `${Number(scale.toFixed(2))}×` : scale}${answer.flat ? `, menus and text ${answer.flat === 'scaler' ? 'through the pixel-art scaler' : answer.flat}` : ''}`,
     note: `Profile ${enhance.engine}${match ? ', ' + match : ''}${answer && answer.layerFailed ? '; the layer failed, the game draws its own 3D' : ''}.`,
   };
 }
