@@ -52,6 +52,24 @@ export const STANDARD_PROFILE = {
   ],
 };
 
+// The Nokia 5320 XpressMusic, the phone N-Gage 2.0 games run on here. As far
+// as the games use them its keys are the N-Gage's (two soft keys, a five-way
+// navigation key whose press is OK, a phone keypad and the clear key), so the
+// layout is the same; only what the guide says differs.
+export const PHONE_PROFILE = {
+  ...STANDARD_PROFILE,
+  id: 'ngage2',
+  name: 'Nokia 5320 standard',
+  notes: [
+    'N-Gage 2.0 games run on a Nokia 5320 phone: a five-way navigation key that also presses in (OK), two soft keys under the screen, a phone keypad and a clear key (C). Most games play on the navigation key and the soft keys, with the screen turned to landscape.',
+  ],
+};
+
+// The standard profile of a platform ('ngage' or 'ngage2').
+export function standardFor(platform) {
+  return platform === 'ngage2' ? PHONE_PROFILE : STANDARD_PROFILE;
+}
+
 // Keyed by the game's UID as the emulator reports it.
 export const GAME_PROFILES = {
   '0x101FD3F6': {
@@ -93,8 +111,9 @@ export const GAME_PROFILES = {
   },
 };
 
-export function profileFor(uid) {
-  return Object.hasOwn(GAME_PROFILES, uid) ? GAME_PROFILES[uid] : STANDARD_PROFILE;
+// The built-in profile of a game, else `fallback` (the platform's standard one).
+export function profileFor(uid, fallback = STANDARD_PROFILE) {
+  return Object.hasOwn(GAME_PROFILES, uid) ? GAME_PROFILES[uid] : fallback;
 }
 
 // --- profiles from the site's catalogue ------------------------------------------
@@ -163,7 +182,7 @@ export function profileFromEntry(entry) {
   if (!isRecord(entry) || !isRecord(entry.controls)) return null;
   const id = typeof entry.slug === 'string' && /^[a-z0-9-]{1,64}$/.test(entry.slug) ? entry.slug : '';
   // "auto" and the standard profile's id mean something else in the settings.
-  if (!id || id === 'auto' || id === STANDARD_PROFILE.id) return null;
+  if (!id || id === 'auto' || id === STANDARD_PROFILE.id || id === PHONE_PROFILE.id) return null;
 
   const { controls } = entry;
   const actions = {};
