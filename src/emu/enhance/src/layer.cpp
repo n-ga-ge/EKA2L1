@@ -23,7 +23,7 @@ namespace eka2l1::enhance {
     // The first six vertices of the buffer are the rectangle that covers the screen.
     static constexpr std::uint32_t QUAD_VERTICES = 6;
 
-    static constexpr std::size_t MAX_CACHED_TEXTURES = 256;
+    static constexpr std::size_t MAX_CACHED_TEXTURES = 1024;
     static constexpr std::size_t MAX_CACHED_BYTES = 64 * 1024 * 1024;
     // How much guest memory is hashed for one picture, to find textures whose
     // content changed. Those not reached wait for the next picture.
