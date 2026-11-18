@@ -72,6 +72,39 @@ set until the kernel is created again. N-Gage 2.0's application checks its
 certificates against it and refuses to install games from 2019 on, so a
 frontend sets a date before that for an N-Gage 2.0 device.
 
+`POST /v1/apps` takes `{"path": ...}` or `{"paths": [...]}` and an optional
+`type`, guessed from the extension when absent: `sis` (`.sis`, `.sisx`),
+`ngage` (an N-Gage card folder or zip), `ngage2` (`.n-gage`: the file is copied
+to `E:\n-gage`, where the N-Gage application finds and installs it itself after
+checking its certificate), or `ngage2-direct`. It answers
+`{"results": [...], "added": [{uid, name, system}]}`, `added` being the apps
+the install made appear.
+
+`ngage2-direct` installs a `.n-gage` file without the N-Gage application, so a
+game installs in the same way whether or not it is signed, and starts with
+`POST /v1/apps/{uid}/launch` without Games running. The file is a MIME
+multipart container (`Content-Description: Ngage-Install-File`) of three
+parts: `RetailerInfo` (XML), `Metadata` (a SIS that drops `metadata.xml` and
+banner PNGs into `c:\private\20007b38\import`) and `Game` (the game's SIS,
+with the same package UID as the Metadata SIS, so installing the Metadata
+part after it would replace the game). The control reads the title and
+description from `metadata.xml` inside the Metadata part without installing
+it, installs the Game part silently to E: (the default install drive when
+there is no E:), and writes the registration the game packages lack and the
+N-Gage application would otherwise stand in for: `<exe>_reg.rsc` in
+`\private\10003a3f\import\apps` and `<exe>_loc.rsc` with the title as caption
+in `\resource\apps`, both on the exe's drive. The exe is the one in
+`\sys\bin` whose UID3 is the package UID (ONE also installs a helper exe), or
+the only one there; a game that cannot be registered is uninstalled again and
+the request fails with `install_failed`.
+Both files are recorded with the package, so `DELETE /v1/apps/{uid}` removes
+them with the game. No icon is registered: the metadata's PNG banners are not
+an icon format apparc reads. Its result entry adds `package`, `title`,
+`description` and `apps` (`[{uid, name, executable}]`), and the game is listed
+in `added` even when it was installed before. The runtime libraries the games
+link to come from the N-Gage application's own `.sis`, which still has to be
+installed (as `sis`) first.
+
 `GET /v1/ngage2/games` opens Games if needed and reads its PlayServer GamesList
 catalogue. `POST /v1/ngage2/games/{uid}/launch` uses the same launch IPC as the
 Games GUI. Both endpoints keep the session attached to Games. The guest IPC

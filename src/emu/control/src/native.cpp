@@ -24,6 +24,7 @@
 #include <kernel/thread.h>
 #include <mutex>
 #include <package/manager.h>
+#include <package/ngage2.h>
 #include <services/applist/applist.h>
 #include <services/window/screen.h>
 #include <services/window/window.h>
@@ -371,6 +372,7 @@ namespace eka2l1::control {
             if (p == std::vector<std::string>{ "v1", "apps" } && req.method == "POST") {
                 auto before = app_list(true);
                 json::array results;
+                std::vector<std::string> direct_apps;
                 auto paths = body.contains("paths") ? body["paths"] : json(json::array{ required_string(body, "path") });
                 require(paths.is_array(), "bad_request", "paths must be an array", 400);
                 for (auto &value : paths.items()) {
@@ -380,6 +382,7 @@ namespace eka2l1::control {
                     auto type = body["type"].string(ext == ".sis" || ext == ".sisx" ? "sis" : ext == ".n-gage" ? "ngage2"
                                                                                                                : "ngage");
                     bool ok = false;
+                    json entry = { { "path", path }, { "type", type } };
                     if (type == "sis")
                         frontend.run_blocking([&] { ok = sys().install_package(common::utf8_to_ucs2(path), sys().get_default_install_drive()) == package::installation_result_success; });
                     else if (type == "ngage")
@@ -389,10 +392,35 @@ namespace eka2l1::control {
                         fs::create_directories(dir);
                         fs::copy_file(fs::u8path(path), dir / fs::u8path(path).filename(), fs::copy_options::overwrite_existing);
                         ok = true;
+                    } else if (type == "ngage2-direct") {
+                        // The game's own SIS part, and a registration of its app, without
+                        // the N-Gage application and its certificate check.
+                        auto *io = sys().get_io_system();
+                        const drive_number drive = io->get_drive_entry(drive_e) ? drive_e : sys().get_default_install_drive();
+                        // The parts are copied out of the file for a moment: to the temporary
+                        // folder (memory on web, never kept), or the emulator's cache without one.
+                        std::error_code no_temp;
+                        auto scratch = fs::temp_directory_path(no_temp);
+                        if (no_temp || !fs::is_directory(scratch, no_temp))
+                            scratch = fs::u8path(add_path(sys().get_config()->storage, "cache/"));
+                        package::ngage2::install_result installed;
+                        frontend.run_blocking([&] { installed = package::ngage2::install_game(*sys().get_packages(), io, path, drive, scratch.string()); });
+                        require(installed.error.empty(), "install_failed", installed.error);
+                        json::array registered;
+                        for (const auto &app : installed.apps) {
+                            registered.push_back({ { "uid", hex(app.uid) }, { "name", common::ucs2_to_utf8(app.caption) }, { "executable", common::ucs2_to_utf8(app.executable) } });
+                            direct_apps.push_back(hex(app.uid));
+                        }
+                        entry["package"] = hex(installed.package_uid);
+                        entry["title"] = common::ucs2_to_utf8(installed.title);
+                        entry["description"] = common::ucs2_to_utf8(installed.description);
+                        entry["apps"] = registered;
+                        ok = true;
                     } else
                         throw api_error(400, "bad_request", "unknown install type");
                     require(ok, "install_failed", "app installation failed");
-                    results.push_back({ { "path", path }, { "type", type }, { "ok", ok } });
+                    entry["ok"] = ok;
+                    results.push_back(entry);
                 }
                 apps()->rescan_registries(sys().get_io_system());
                 frontend.changed(native_change::applications);
@@ -403,7 +431,8 @@ namespace eka2l1::control {
                     for (const auto &old : before.items())
                         if (old["uid"].string() == app["uid"].string())
                             exists = true;
-                    if (!exists)
+                    // A game installed again keeps its UID, but this install registered it.
+                    if (!exists || std::find(direct_apps.begin(), direct_apps.end(), app["uid"].string()) != direct_apps.end())
                         added.push_back(app);
                 }
                 return response::from_json({ { "results", results }, { "added", added } });
