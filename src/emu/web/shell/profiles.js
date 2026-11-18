@@ -138,6 +138,7 @@ export function switchBindings(input, bindings) {
   const before = input.keyboard;
   input.keyboard = keyboard;
   input.gamepad = gamepad;
+  input.lockKeyboard();
 
   for (const code of held) {
     const was = before.get(code) || [];
