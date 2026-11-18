@@ -47,7 +47,7 @@ import { Eka2l1 } from './eka2l1-client.js';
 import { NGAGE_KEYS, keyName, padName } from './games.js';
 import { Input } from './input.js';
 import { Downloads, LoadError, beginLoad, fileSource, wantedFromParams } from './loader.js';
-import { PHONE_CLOCK_MS, PHONE_MEMORY_MB, ngageFile, standInInstall } from './ngage2.js';
+import { PHONE_CLOCK_MS, PHONE_MEMORY_MB, ngageFile } from './ngage2.js';
 import { MAX_PLAYERS, NAME_LENGTH, RelayTransport, Session, cleanCode, cleanGame, cleanName, errorText, gameFromUid, publicRooms, relayBase, relayHealthy } from './net.js';
 import { autoProfile, gameProfiles, isStandard, lookUpEnhancement, lookUpGame, lookUpProfile, profileById, siteLinks, standardProfile, switchBindings, usePlatform } from './profiles.js';
 import { downloadBlob, exportFileName, exportSaves, importSaves, listSaves } from './saves.js';
@@ -279,10 +279,6 @@ async function installPhoneGame(source, expected) {
   const base = expected && expected.slug ? expected.slug : 'game';
   const installed = await installFile({ ...file, key: source.key }, `${base}.n-gage`, async (path) => {
     const response = await page.emu.request('POST', '/v1/apps', { path, type: 'ngage2-direct' });
-    // An emulator from before that install type: the page's stand-in (ngage2.js).
-    if (response.status === 400 && /unknown install type/.test(response.text())) {
-      return standInInstall(page.emu, file, base, expected && expected.uid).catch((error) => { throw Object.assign(error, { kept: true }); });
-    }
     if (!response.ok) throw new Error(`The game could not be installed (${response.status}): ${response.text()}`);
     return response.json();
   });
