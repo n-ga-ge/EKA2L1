@@ -17,8 +17,9 @@
 #include <string>
 
 namespace eka2l1::enhance {
-    // Bytes of one vertex: a clip-space position, a texture coordinate, a colour.
-    static constexpr std::size_t VERTEX_SIZE = 28;
+    // Bytes of one vertex: a clip-space position, a texture coordinate, a
+    // colour, a palette row.
+    static constexpr std::size_t VERTEX_SIZE = 32;
     // The first six vertices of the buffer are the rectangle that covers the screen.
     static constexpr std::uint32_t QUAD_VERTICES = 6;
 
@@ -44,9 +45,11 @@ namespace eka2l1::enhance {
 layout (location = 0) in vec4 inPosition;
 layout (location = 1) in vec2 inTexCoord;
 layout (location = 2) in vec4 inColor;
+layout (location = 3) in float inRow;
 
 out vec2 vTexCoord;
 out vec4 vColor;
+out float vRow;
 
 void main() {
     // The position comes multiplied by the triangle's own w, so that the
@@ -55,6 +58,7 @@ void main() {
     gl_Position = inPosition;
     vTexCoord = inTexCoord;
     vColor = inColor;
+    vRow = inRow;
 }
 )glsl";
 
@@ -63,14 +67,44 @@ uniform sampler2D uTexture;
 // The guest's picture: triangles are drawn only on its pixels that have the
 // key colour in them, so whatever else is on the screen stays as it is.
 uniform sampler2D uScreen;
-// x: one when texels without alpha are not drawn; y: one when there is a texture.
+// A texture with palette rows: uTexture holds its texel indices (red, a
+// byte), this its table, a row of colours for each palette.
+uniform sampler2D uTable;
+// x: one when texels without alpha are not drawn; y: one when there is a texture;
+// z: one when it has palette rows; w: one to smooth such a texture.
 uniform vec4 uMode;
 // x, y: screen pixels to a pixel of the picture.
 uniform vec4 uView;
 
 in vec2 vTexCoord;
 in vec4 vColor;
+in float vRow;
 out vec4 oColor;
+
+// The colour of a texel of a texture with palette rows, the texture repeating.
+vec4 tableTexel(ivec2 at, ivec2 size, int row) {
+    at -= size * ivec2(floor(vec2(at) / vec2(size)));
+    int index = int(texelFetch(uTexture, at, 0).r * 255.0 + 0.5);
+    return texelFetch(uTable, ivec2(index, row), 0);
+}
+
+vec4 tableColor() {
+    ivec2 size = textureSize(uTexture, 0);
+    // Each pixel takes the palette its interpolated row names.
+    int row = clamp(int(floor(vRow)), 0, textureSize(uTable, 0).y - 1);
+    vec2 at = vTexCoord * vec2(size);
+    if (uMode.w < 0.5) {
+        return tableTexel(ivec2(floor(at)), size, row);
+    }
+
+    // Smoothed: the four colours around the point, not their indices.
+    vec2 from = at - vec2(0.5);
+    ivec2 base = ivec2(floor(from));
+    vec2 part = from - vec2(base);
+    vec4 top = mix(tableTexel(base, size, row), tableTexel(base + ivec2(1, 0), size, row), part.x);
+    vec4 bottom = mix(tableTexel(base + ivec2(0, 1), size, row), tableTexel(base + ivec2(1, 1), size, row), part.x);
+    return mix(top, bottom, part.y);
+}
 
 void main() {
     ivec2 last = textureSize(uScreen, 0) - ivec2(1);
@@ -82,7 +116,7 @@ void main() {
     vec4 color = vColor;
 
     if (uMode.y > 0.5) {
-        vec4 texel = texture(uTexture, vTexCoord);
+        vec4 texel = (uMode.z > 0.5) ? tableColor() : texture(uTexture, vTexCoord);
         if (uMode.x > 0.5 && texel.a < 0.5) {
             discard;
         }
@@ -105,6 +139,7 @@ uniform vec4 uParams;
 
 in vec2 vTexCoord;
 in vec4 vColor;
+in float vRow;
 out vec4 oColor;
 
 // How far a pixel in the key colour looks for one of the picture.
@@ -633,10 +668,11 @@ void main() {
         mode_loc_ = triangle_meta.get_uniform_binding("uMode");
         triangle_screen_loc_ = triangle_meta.get_uniform_binding("uScreen");
         view_loc_ = triangle_meta.get_uniform_binding("uView");
+        table_loc_ = triangle_meta.get_uniform_binding("uTable");
         screen_loc_ = compose_meta.get_uniform_binding("uScreen");
         params_loc_ = compose_meta.get_uniform_binding("uParams");
 
-        drivers::input_descriptor layout[3] = {};
+        drivers::input_descriptor layout[4] = {};
         layout[0].location = 0;
         layout[0].offset = 0;
         layout[0].set_format(4, drivers::data_format::sfloat);
@@ -647,12 +683,15 @@ void main() {
         layout[2].offset = 24;
         layout[2].set_format(4, drivers::data_format::byte);
         layout[2].set_normalized(true);
+        layout[3].location = 3;
+        layout[3].offset = 28;
+        layout[3].set_format(1, drivers::data_format::sfloat);
         for (drivers::input_descriptor &one : layout) {
             one.stride = static_cast<int>(VERTEX_SIZE);
             one.buffer_slot = 0;
         }
 
-        input_layout_ = drivers::create_input_descriptors(driver, layout, 3);
+        input_layout_ = drivers::create_input_descriptors(driver, layout, 4);
         vertex_buffer_ = drivers::create_buffer(driver, nullptr, VERTEX_SIZE * QUAD_VERTICES,
             static_cast<drivers::buffer_upload_hint>(drivers::buffer_upload_dynamic | drivers::buffer_upload_draw));
 
@@ -669,6 +708,9 @@ void main() {
         if (builder) {
             for (const cached_texture &entry : cache_) {
                 builder->destroy(entry.handle);
+                if (entry.table) {
+                    builder->destroy(entry.table);
+                }
             }
 
             if (screen_texture_) {
@@ -689,9 +731,26 @@ void main() {
         cache_size_ = 0;
     }
 
+    // Bytes a cached texture takes on the GPU.
+    static std::size_t gpu_bytes(const texture_ref &ref) {
+        const std::size_t texels = std::size_t(ref.width) * ref.height;
+        if (!ref.palette_rows) {
+            return texels * 4;
+        }
+        return texels + std::size_t((ref.format == FORMAT_P4) ? 16 : 256) * ref.palette_rows * 4;
+    }
+
     void layer::prepare_textures(drivers::graphics_command_builder &builder, const frame &f, const bool linear,
-        std::vector<drivers::handle> &handles) {
+        std::vector<drivers::handle> &handles, std::vector<drivers::handle> &tables) {
         handles.assign(f.textures.size(), 0);
+        tables.assign(f.textures.size(), 0);
+
+        auto release = [&builder](const cached_texture &entry) {
+            builder.destroy(entry.handle);
+            if (entry.table) {
+                builder.destroy(entry.table);
+            }
+        };
 
         std::vector<bool> used(f.textures.size(), false);
         for (const draw &d : f.draws) {
@@ -703,7 +762,7 @@ void main() {
         // Textures that came inline with another test frame are of no use again.
         for (auto entry = cache_.begin(); entry != cache_.end();) {
             if (entry->inline_frame && entry->inline_frame != f.number) {
-                builder.destroy(entry->handle);
+                release(*entry);
                 cache_bytes_ -= entry->bytes;
                 entry = cache_.erase(entry);
             } else {
@@ -721,6 +780,7 @@ void main() {
 
         const drivers::filter_option filter = linear ? drivers::filter_option::linear : drivers::filter_option::nearest;
         std::vector<std::uint32_t> pixels;
+        std::vector<std::uint8_t> indices;
         std::vector<std::size_t> known;
         std::uint64_t uploaded = 0;
 
@@ -742,6 +802,50 @@ void main() {
                 builder.set_texture_addressing_mode(entry.handle, drivers::addressing_direction::s, drivers::addressing_option::repeat);
                 builder.set_texture_addressing_mode(entry.handle, drivers::addressing_direction::t, drivers::addressing_option::repeat);
                 entry.filter_set = false;
+            }
+
+            uploaded++;
+        };
+
+        // A texture with palette rows: the indices, a byte a texel, and the
+        // table, a row of colours for each palette. Both are read with
+        // texelFetch, so their filter only has to make them complete; the
+        // shader smooths by hand.
+        auto upload_rows = [&](cached_texture &entry, const std::vector<std::uint8_t> &texels, const std::vector<std::uint32_t> &table) {
+            const eka2l1::vec3 size(static_cast<int>(entry.ref.width), static_cast<int>(entry.ref.height), 0);
+            const int rows = static_cast<int>(entry.ref.palette_rows);
+            const eka2l1::vec3 table_size(static_cast<int>(table.size() / std::max(rows, 1)), rows, 0);
+
+            if (!entry.handle) {
+                entry.handle = drivers::create_texture(driver_, 2, 0, drivers::texture_format::r8, drivers::texture_format::r,
+                    drivers::texture_data_type::ubyte, texels.data(), texels.size(), size, 0, 1);
+            } else {
+                builder.recreate_texture(entry.handle, 2, 0, drivers::texture_format::r8, drivers::texture_format::r,
+                    drivers::texture_data_type::ubyte, texels.data(), texels.size(), size, 0, 1);
+            }
+
+            if (!entry.table) {
+                entry.table = drivers::create_texture(driver_, 2, 0, drivers::texture_format::rgba, drivers::texture_format::rgba,
+                    drivers::texture_data_type::ubyte, table.data(), table.size() * 4, table_size);
+            } else {
+                builder.recreate_texture(entry.table, 2, 0, drivers::texture_format::rgba, drivers::texture_format::rgba,
+                    drivers::texture_data_type::ubyte, table.data(), table.size() * 4, table_size);
+            }
+
+            if (!entry.handle || !entry.table) {
+                if (entry.handle) {
+                    builder.destroy(entry.handle);
+                }
+                if (entry.table) {
+                    builder.destroy(entry.table);
+                }
+                entry.handle = entry.table = 0;
+                return;
+            }
+
+            for (const drivers::handle h : { entry.handle, entry.table }) {
+                builder.set_texture_filter(h, true, drivers::filter_option::nearest);
+                builder.set_texture_filter(h, false, drivers::filter_option::nearest);
             }
 
             uploaded++;
@@ -775,14 +879,23 @@ void main() {
             if (is_inline) {
                 entry.inline_frame = f.number;
                 entry.inline_index = static_cast<std::uint32_t>(index);
-                upload(entry, f.texture_pixels[index]);
+                if (index < f.texture_indices.size() && !f.texture_indices[index].empty()) {
+                    upload_rows(entry, f.texture_indices[index], f.texture_pixels[index]);
+                } else {
+                    upload(entry, f.texture_pixels[index]);
+                }
+            } else if (ref.palette_rows) {
+                if (engine_.decode_table_locked(f.process_uid, ref, indices, pixels)) {
+                    engine_.hash_locked(f.process_uid, ref, entry.hash);
+                    upload_rows(entry, indices, pixels);
+                }
             } else if (engine_.decode_locked(f.process_uid, ref, pixels)) {
                 engine_.hash_locked(f.process_uid, ref, entry.hash);
                 upload(entry, pixels);
             }
 
             if (entry.handle) {
-                entry.bytes = std::size_t(ref.width) * ref.height * 4;
+                entry.bytes = gpu_bytes(ref);
                 cache_bytes_ += entry.bytes;
                 cache_.push_back(entry);
             }
@@ -797,8 +910,13 @@ void main() {
         std::size_t hashed = 0;
         for (const std::size_t at : known) {
             cached_texture &entry = cache_[at];
-            const std::size_t cost = std::size_t(entry.ref.pitch ? entry.ref.pitch : entry.ref.width * pixel_size(entry.ref.format))
+            std::size_t cost = std::size_t(entry.ref.pitch ? entry.ref.pitch : entry.ref.width * pixel_size(entry.ref.format))
                 * entry.ref.height;
+            if (entry.ref.palette_rows) {
+                // The whole table is hashed as well.
+                cost += std::size_t(entry.ref.palette_rows) * ((entry.ref.format == FORMAT_P4) ? 16 : 256)
+                    * std::max<std::uint32_t>(entry.ref.palette_stride, 1);
+            }
             if (hashed && hashed + cost > HASH_BYTES_A_PICTURE) {
                 break;
             }
@@ -807,8 +925,16 @@ void main() {
             entry.last_checked = pass_;
 
             std::uint64_t hash = 0;
-            if (engine_.hash_locked(entry.process_uid, entry.ref, hash) && hash != entry.hash
-                && engine_.decode_locked(entry.process_uid, entry.ref, pixels)) {
+            if (!engine_.hash_locked(entry.process_uid, entry.ref, hash) || hash == entry.hash) {
+                continue;
+            }
+
+            if (entry.ref.palette_rows) {
+                if (engine_.decode_table_locked(entry.process_uid, entry.ref, indices, pixels)) {
+                    entry.hash = hash;
+                    upload_rows(entry, indices, pixels);
+                }
+            } else if (engine_.decode_locked(entry.process_uid, entry.ref, pixels)) {
                 entry.hash = hash;
                 upload(entry, pixels);
             }
@@ -824,7 +950,7 @@ void main() {
                 break;
             }
 
-            builder.destroy(oldest->handle);
+            release(*oldest);
             cache_bytes_ -= oldest->bytes;
             cache_.erase(oldest);
         }
@@ -839,7 +965,7 @@ void main() {
                     continue;
                 }
 
-                if (!entry.filter_set || entry.linear != linear) {
+                if (!entry.table && (!entry.filter_set || entry.linear != linear)) {
                     builder.set_texture_filter(entry.handle, true, filter);
                     builder.set_texture_filter(entry.handle, false, filter);
                     entry.filter_set = true;
@@ -847,6 +973,7 @@ void main() {
                 }
 
                 handles[index] = entry.handle;
+                tables[index] = entry.table;
                 break;
             }
         }
@@ -932,8 +1059,8 @@ void main() {
             return false;
         }
 
-        std::vector<drivers::handle> textures;
-        prepare_textures(builder, f, linear, textures);
+        std::vector<drivers::handle> textures, tables;
+        prepare_textures(builder, f, linear, textures, tables);
 
         // Depth as the engine has it, brought into the depth buffer's range.
         // Only its order matters.
@@ -958,12 +1085,13 @@ void main() {
         std::uint8_t *out = vertex_data_.data();
 
         auto put = [&out](const float x, const float y, const float z, const float w, const float u, const float v,
-                       const std::uint32_t argb) {
+                       const std::uint32_t argb, const float row = 0.0f) {
             const float floats[6] = { x, y, z, w, u, v };
             const std::uint8_t color[4] = { static_cast<std::uint8_t>(argb >> 16), static_cast<std::uint8_t>(argb >> 8),
                 static_cast<std::uint8_t>(argb), static_cast<std::uint8_t>(argb >> 24) };
             std::memcpy(out, floats, 24);
             std::memcpy(out + 24, color, 4);
+            std::memcpy(out + 28, &row, 4);
             out += VERTEX_SIZE;
         };
 
@@ -1010,7 +1138,7 @@ void main() {
                     const float y = c.y / fh * 2.0f - 1.0f;
                     const float z = (d.depth == DEPTH_NONE) ? 0.0f
                                                              : std::clamp((c.z - nearest) / depth_span, 0.0f, 1.0f) * 2.0f - 1.0f;
-                    put(x * w, y * w, z * w, w, c.u / tw, c.v / th, c.color);
+                    put(x * w, y * w, z * w, w, c.u / tw, c.v / th, c.color, c.row);
                 }
             }
         }
@@ -1051,6 +1179,7 @@ void main() {
         builder.bind_texture(picture, 1);
         builder.set_texture_for_shader(0, texture_loc_, drivers::shader_module_type::fragment);
         builder.set_texture_for_shader(1, triangle_screen_loc_, drivers::shader_module_type::fragment);
+        builder.set_texture_for_shader(2, table_loc_, drivers::shader_module_type::fragment);
         builder.set_dynamic_uniform(view_loc_, drivers::shader_var_type::vec4, view, sizeof(view));
         builder.set_color_mask(0b0111);
 
@@ -1071,8 +1200,8 @@ void main() {
         }
 
         int blend_now = -1, depth_now = -1;
-        drivers::handle texture_now = ~drivers::handle(0);
-        float mode_now[4] = { -1.0f, -1.0f, 0.0f, 0.0f };
+        drivers::handle texture_now = ~drivers::handle(0), table_now = ~drivers::handle(0);
+        float mode_now[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 
         for (const draw &d : f.draws) {
             if (!d.vertex_count || std::size_t(d.first_vertex) + d.vertex_count > f.vertices.size()) {
@@ -1147,8 +1276,15 @@ void main() {
                 builder.bind_texture(texture, 0);
             }
 
-            const float mode[4] = { d.blend == BLEND_KEY ? 1.0f : 0.0f, texture ? 1.0f : 0.0f, 0.0f, 0.0f };
-            if (mode[0] != mode_now[0] || mode[1] != mode_now[1]) {
+            const drivers::handle table = texture ? tables[d.texture] : 0;
+            if (table && table != table_now) {
+                table_now = table;
+                builder.bind_texture(table, 2);
+            }
+
+            const float mode[4] = { d.blend == BLEND_KEY ? 1.0f : 0.0f, texture ? 1.0f : 0.0f, table ? 1.0f : 0.0f,
+                (table && linear) ? 1.0f : 0.0f };
+            if (std::memcmp(mode, mode_now, sizeof(mode)) != 0) {
                 std::memcpy(mode_now, mode, sizeof(mode));
                 builder.set_dynamic_uniform(mode_loc_, drivers::shader_var_type::vec4, mode, sizeof(mode));
             }

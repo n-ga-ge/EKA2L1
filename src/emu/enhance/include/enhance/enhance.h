@@ -68,6 +68,10 @@ namespace eka2l1::enhance {
         float u = 0, v = 0;
         // 0xAARRGGBB, multiplied with the texture.
         std::uint32_t color = 0xFFFFFFFF;
+        // Which palette of a texture with palette rows a pixel takes: it is
+        // interpolated like u and v, and each pixel uses floor(row), clamped
+        // to the rows there are. Ignored by other textures.
+        float row = 0;
     };
 
     // A texture as it lies in guest memory when it was drawn with.
@@ -80,6 +84,11 @@ namespace eka2l1::enhance {
         // Bytes from one palette entry to the next (a paletted texture
         // only); 0 is the size of an entry in the palette's format.
         std::uint32_t palette_stride = 0;
+        // A paletted texture whose palette is chosen per pixel from a table
+        // of this many (2 to 256; 0 for one palette), `palette_row_stride`
+        // bytes apart, by the interpolated `vertex::row`.
+        std::uint32_t palette_rows = 0;
+        std::uint32_t palette_row_stride = 0;
         texture_format format = FORMAT_NONE;
         texture_format palette_format = FORMAT_NONE;
         bool has_key = false;
@@ -88,6 +97,7 @@ namespace eka2l1::enhance {
         bool operator==(const texture_ref &other) const {
             return id == other.id && pixels == other.pixels && width == other.width && height == other.height
                 && pitch == other.pitch && palette == other.palette && palette_stride == other.palette_stride
+                && palette_rows == other.palette_rows && palette_row_stride == other.palette_row_stride
                 && format == other.format
                 && palette_format == other.palette_format && has_key == other.has_key && key == other.key;
         }
@@ -128,10 +138,13 @@ namespace eka2l1::enhance {
         // Only in a frame that was injected (`POST /v1/enhance/test-frame`),
         // not captured. Pixels of textures that are not in guest memory: as
         // many entries as `textures`, each empty or width times height
-        // 0xAABBGGRR words. And a picture that stands in for the guest's
+        // 0xAABBGGRR words; for a texture with palette rows, the table
+        // instead (entries times rows words, a row after another), with its
+        // texel indices in `texture_indices`. And a picture that stands in for the guest's
         // screen while this frame is shown, or nothing.
         bool injected = false;
         std::vector<std::vector<std::uint32_t>> texture_pixels;
+        std::vector<std::vector<std::uint8_t>> texture_indices;
         std::uint32_t screen_width = 0, screen_height = 0;
         std::vector<std::uint32_t> screen_pixels;
     };
@@ -176,7 +189,9 @@ namespace eka2l1::enhance {
 
     /**
      * Read a texture or the target out of the memory of the process with this
-     * UID as 0xAABBGGRR words (R in the first byte), row after row.
+     * UID as 0xAABBGGRR words (R in the first byte), row after row. A texture
+     * with palette rows comes as its picture through each palette in turn,
+     * one under the other: width by height times rows.
      *
      * \returns False when the memory is not mapped or the description is unusable.
      */

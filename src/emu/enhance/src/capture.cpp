@@ -31,6 +31,12 @@ namespace eka2l1::enhance {
     static constexpr int MAX_DRAW_VERTICES = 4096;
     static constexpr std::uint32_t MAX_TEXTURE_SIDE = 2048;
     static constexpr std::uint32_t MAX_PALETTE_STRIDE = 16;
+    // A texture with palette rows: at most this many, this far apart.
+    static constexpr std::uint32_t MAX_PALETTE_ROWS = 256;
+    static constexpr std::uint32_t MAX_PALETTE_ROW_STRIDE = 65536;
+    // The texture route gives such a texture through every row, one under
+    // the other; past this many pixels it refuses.
+    static constexpr std::size_t MAX_DECODED_PIXELS = 16 * 1024 * 1024;
 
     static std::uint32_t bytes_per_pixel(const texture_format format);
 
@@ -510,6 +516,9 @@ namespace eka2l1::enhance {
             if (!fields.v.empty()) {
                 v.v = static_cast<float>(fields.v.eval(ctx));
             }
+            if (!fields.row.empty()) {
+                v.row = static_cast<float>(fields.row.eval(ctx));
+            }
             if (!fields.color.empty()) {
                 v.color = to_u32(fields.color.eval(ctx));
             } else if (separate_color) {
@@ -517,7 +526,7 @@ namespace eka2l1::enhance {
             }
 
             if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z) || !std::isfinite(v.w)
-                || !std::isfinite(v.u) || !std::isfinite(v.v)) {
+                || !std::isfinite(v.u) || !std::isfinite(v.v) || !std::isfinite(v.row)) {
                 ctx.fault = true;
             }
 
@@ -541,6 +550,12 @@ namespace eka2l1::enhance {
             // The stride the palette is read with, so that the frame reports it.
             ref.palette_stride = (ref.format != FORMAT_P8 && ref.format != FORMAT_P4) ? 0
                 : (hook.texture.palette_stride ? hook.texture.palette_stride : bytes_per_pixel(ref.palette_format));
+            if (hook.texture.palette_rows) {
+                // The stride from one palette to the next, as it is read.
+                ref.palette_rows = hook.texture.palette_rows;
+                ref.palette_row_stride = hook.texture.palette_row_stride ? hook.texture.palette_row_stride
+                    : ((ref.format == FORMAT_P4) ? 16 : 256) * ref.palette_stride;
+            }
             if (!hook.texture.key.empty()) {
                 ref.has_key = true;
                 ref.key = to_u32(hook.texture.key.eval(ctx));
@@ -760,7 +775,12 @@ namespace eka2l1::enhance {
         if ((texture.format == FORMAT_P8 || texture.format == FORMAT_P4) && texture.palette) {
             const std::uint32_t entry = bytes_per_pixel(texture.palette_format);
             const std::uint32_t stride = texture.palette_stride ? texture.palette_stride : entry;
-            feed(texture.palette, ((texture.format == FORMAT_P4) ? 15 : 255) * stride + entry);
+            const std::uint32_t one = ((texture.format == FORMAT_P4) ? 15 : 255) * stride + entry;
+            // Every palette of the table: each row, not what lies between them.
+            const std::uint32_t rows = std::max<std::uint32_t>(texture.palette_rows, 1);
+            for (std::uint32_t r = 0; r < rows && mapped; r++) {
+                feed(texture.palette + r * texture.palette_row_stride, one);
+            }
         }
 
         hash = XXH64_digest(state);
@@ -773,7 +793,87 @@ namespace eka2l1::enhance {
         return decode_locked(process_uid, texture, rgba);
     }
 
+    bool engine::decode_table_locked(const std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint8_t> &indices,
+        std::vector<std::uint32_t> &table) {
+        const bool packed = (texture.format == FORMAT_P4);
+        if (!usable(texture) || (!packed && texture.format != FORMAT_P8) || texture.palette_rows < 2
+            || texture.palette_rows > MAX_PALETTE_ROWS || !texture.palette) {
+            return false;
+        }
+
+        kernel::process *pr = running_process(kern(), process_uid);
+        if (!pr) {
+            return false;
+        }
+
+        const std::uint32_t entry = bytes_per_pixel(texture.palette_format);
+        const std::uint32_t stride = texture.palette_stride ? texture.palette_stride : entry;
+        const std::uint32_t colours = packed ? 16 : 256;
+        if (!entry || texture.palette_format == FORMAT_P8 || stride < entry || stride > MAX_PALETTE_STRIDE) {
+            return false;
+        }
+
+        table.resize(std::size_t(colours) * texture.palette_rows);
+        std::uint8_t raw[256 * MAX_PALETTE_STRIDE];
+        for (std::uint32_t r = 0; r < texture.palette_rows; r++) {
+            if (!read_guest(pr, texture.palette + r * texture.palette_row_stride, raw, (colours - 1) * stride + entry)) {
+                return false;
+            }
+
+            std::uint32_t *out = table.data() + std::size_t(r) * colours;
+            for (std::uint32_t n = 0; n < colours; n++) {
+                out[n] = to_rgba(texture.palette_format, read_pixel(raw + n * stride, entry));
+            }
+
+            if (texture.has_key && texture.key < colours) {
+                out[texture.key] &= 0x00FFFFFF;
+            }
+        }
+
+        const std::uint32_t row_bytes = row_bytes_of(texture);
+        const std::uint32_t pitch = texture.pitch ? texture.pitch : row_bytes;
+        if (pitch < row_bytes) {
+            return false;
+        }
+
+        indices.resize(std::size_t(texture.width) * texture.height);
+        std::vector<std::uint8_t> row(row_bytes);
+        for (std::uint32_t y = 0; y < texture.height; y++) {
+            if (!read_guest(pr, texture.pixels + y * pitch, row.data(), row_bytes)) {
+                return false;
+            }
+
+            std::uint8_t *out = indices.data() + std::size_t(y) * texture.width;
+            for (std::uint32_t x = 0; x < texture.width; x++) {
+                out[x] = packed ? static_cast<std::uint8_t>((row[x / 2] >> ((x & 1) * 4)) & 15U) : row[x];
+            }
+        }
+
+        return true;
+    }
+
     bool engine::decode_locked(const std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba) {
+        if (texture.palette_rows) {
+            // Through every palette of the table, one picture under another.
+            std::vector<std::uint8_t> indices;
+            std::vector<std::uint32_t> table;
+            if (std::size_t(texture.width) * texture.height * texture.palette_rows > MAX_DECODED_PIXELS
+                || !decode_table_locked(process_uid, texture, indices, table)) {
+                return false;
+            }
+
+            const std::size_t colours = table.size() / texture.palette_rows;
+            rgba.resize(indices.size() * texture.palette_rows);
+            for (std::uint32_t r = 0; r < texture.palette_rows; r++) {
+                const std::uint32_t *palette = table.data() + r * colours;
+                std::uint32_t *out = rgba.data() + r * indices.size();
+                for (std::size_t n = 0; n < indices.size(); n++) {
+                    out[n] = palette[indices[n]];
+                }
+            }
+            return true;
+        }
+
         // A four-bit texture is read a byte at a time and split below.
         const bool packed = (texture.format == FORMAT_P4);
         const bool paletted = packed || (texture.format == FORMAT_P8);
@@ -853,6 +953,43 @@ namespace eka2l1::enhance {
         }
 
         throw api_error(400, "bad_profile", std::string("unknown ") + what + " `" + value.string() + "`");
+    }
+
+    // `paletteRows` and `paletteRowStride` of a texture description, checked.
+    // A frame as GET /v1/enhance/frame gives it has zero for both on other
+    // textures (`zero_is_none`).
+    static void palette_rows_of(const json &texture, const bool paletted, std::uint32_t &rows, std::uint32_t &row_stride,
+        const std::string &where, const char *code, const bool zero_is_none = false) {
+        const json &count = texture["paletteRows"];
+        const json &stride = texture["paletteRowStride"];
+        rows = row_stride = 0;
+        if (zero_is_none && count.is_number() && count.number() == 0) {
+            return;
+        }
+        if (count.is_null()) {
+            if (!stride.is_null()) {
+                throw api_error(400, code, where + ": `paletteRowStride` needs `paletteRows`");
+            }
+            return;
+        }
+
+        if (!paletted) {
+            throw api_error(400, code, where + ": `paletteRows` belongs to a paletted texture");
+        }
+
+        const double value = count.is_number() ? count.number() : 0;
+        if (value != std::floor(value) || value < 2 || value > MAX_PALETTE_ROWS) {
+            throw api_error(400, code, where + ": `paletteRows` must be a whole number from 2 to 256");
+        }
+        rows = static_cast<std::uint32_t>(value);
+
+        if (!stride.is_null() && !(zero_is_none && stride.is_number() && stride.number() == 0)) {
+            const double bytes = stride.is_number() ? stride.number() : 0;
+            if (bytes != std::floor(bytes) || bytes < 1 || bytes > MAX_PALETTE_ROW_STRIDE) {
+                throw api_error(400, code, where + ": `paletteRowStride` must be a whole number from 1 to 65536");
+            }
+            row_stride = static_cast<std::uint32_t>(bytes);
+        }
     }
 
     static expr compile_field(const json &value, name_table &names, const std::string &where) {
@@ -988,6 +1125,7 @@ namespace eka2l1::enhance {
                     hook.fields.g = compile_field(fields["g"], names, where + " fields.g");
                     hook.fields.b = compile_field(fields["b"], names, where + " fields.b");
                     hook.fields.a = compile_field(fields["a"], names, where + " fields.a");
+                    hook.fields.row = compile_field(fields["row"], names, where + " fields.row");
 
                     const json &texture = entry["texture"];
                     if (texture.is_object()) {
@@ -1020,6 +1158,13 @@ namespace eka2l1::enhance {
 
                             hook.texture.palette_stride = static_cast<std::uint32_t>(value);
                         }
+
+                        palette_rows_of(texture, paletted, hook.texture.palette_rows, hook.texture.palette_row_stride,
+                            where, "bad_profile");
+                    }
+
+                    if (!hook.fields.row.empty() && !hook.texture.palette_rows) {
+                        throw api_error(400, "bad_profile", where + ": `fields.row` needs a texture with `paletteRows`");
                     }
 
                     static const std::pair<const char *, blend_mode> blends[] = {
@@ -1091,6 +1236,18 @@ namespace eka2l1::enhance {
         return words;
     }
 
+    // Base64 of exactly `count` bytes.
+    static std::vector<std::uint8_t> bytes_of(const json &value, const std::size_t count, const std::string &where) {
+        const std::string text = value.is_string() ? value.string() : std::string();
+        std::vector<std::uint8_t> bytes(count);
+        if (text.size() != (count + 2) / 3 * 4
+            || crypt::base64_decode(reinterpret_cast<const std::uint8_t *>(text.data()), text.size(),
+                   reinterpret_cast<char *>(bytes.data()), count) != count) {
+            throw api_error(400, "bad_frame", where + " must be base64 of width times height bytes");
+        }
+        return bytes;
+    }
+
     static std::uint32_t side_of(const json &value, const std::string &where) {
         const std::uint32_t side = number_of(value, where);
         if (!side || side > MAX_TEXTURE_SIDE) {
@@ -1116,16 +1273,32 @@ namespace eka2l1::enhance {
         f.height = body["height"].is_null() ? 208 : side_of(body["height"], "`height`");
         f.process_uid = body["process"].is_null() ? 0 : number_of(body["process"], "`process`");
 
-        if (!body["vertices"].is_array() || body["vertices"].items().size() % 7
-            || body["vertices"].items().size() / 7 > MAX_FRAME_VERTICES) {
-            throw api_error(400, "bad_frame", "`vertices` must be an array of seven numbers a vertex: x, y, z, w, u, v, colour");
+        // Eight numbers a vertex, as GET /v1/enhance/frame gives them; seven
+        // (without the row) when the body's `vertexLayout` says so, as frames
+        // saved before the row was added do. Any other layout is refused.
+        static const char *layout_names[] = { "x", "y", "z", "w", "u", "v", "color", "row" };
+        std::size_t stride = 8;
+        const json &layout = body["vertexLayout"];
+        if (!layout.is_null()) {
+            bool known = layout.is_array() && (layout.items().size() == 7 || layout.items().size() == 8);
+            for (std::size_t k = 0; known && k < layout.items().size(); k++) {
+                known = layout.items()[k].string() == layout_names[k];
+            }
+            if (!known) {
+                throw api_error(400, "bad_frame", "`vertexLayout` must be x, y, z, w, u, v, color, row, or the first seven of them");
+            }
+            stride = layout.items().size();
+        }
+        if (!body["vertices"].is_array() || body["vertices"].items().size() % stride
+            || body["vertices"].items().size() / stride > MAX_FRAME_VERTICES) {
+            throw api_error(400, "bad_frame", "`vertices` must be an array of eight numbers a vertex: x, y, z, w, u, v, colour, row");
         }
 
         const json::array &numbers = body["vertices"].items();
-        f.vertices.resize(numbers.size() / 7);
+        f.vertices.resize(numbers.size() / stride);
         for (std::size_t n = 0; n < f.vertices.size(); n++) {
-            const json *at = numbers.data() + n * 7;
-            for (int k = 0; k < 7; k++) {
+            const json *at = numbers.data() + n * stride;
+            for (std::size_t k = 0; k < stride; k++) {
                 if (!at[k].is_number() || !std::isfinite(at[k].number())) {
                     throw api_error(400, "bad_frame", "`vertices` must hold finite numbers only");
                 }
@@ -1139,6 +1312,7 @@ namespace eka2l1::enhance {
             v.u = static_cast<float>(at[4].number());
             v.v = static_cast<float>(at[5].number());
             v.color = to_u32(at[6].number());
+            v.row = (stride > 7) ? static_cast<float>(at[7].number()) : 0.0f;
         }
 
         if (body["textures"].is_array()) {
@@ -1154,7 +1328,26 @@ namespace eka2l1::enhance {
                 ref.width = side_of(entry["width"], where + ": `width`");
                 ref.height = side_of(entry["height"], where + ": `height`");
 
-                if (!entry["data"].is_null()) {
+                if (!entry["indices"].is_null()) {
+                    // A texture with palette rows, inline: its texel indices,
+                    // a byte each, and the table, `paletteRows` rows of 256
+                    // colours (R, G, B, A bytes).
+                    const json &rows = entry["paletteRows"];
+                    const double count = rows.is_number() ? rows.number() : 0;
+                    if (count != std::floor(count) || count < 2 || count > MAX_PALETTE_ROWS) {
+                        throw api_error(400, "bad_frame", where + ": `indices` needs `paletteRows`, a whole number from 2 to 256");
+                    }
+
+                    ref.format = FORMAT_P8;
+                    ref.palette_format = FORMAT_ARGB8888;
+                    ref.palette_stride = 4;
+                    ref.palette_rows = static_cast<std::uint32_t>(count);
+                    ref.palette_row_stride = 256 * 4;
+
+                    f.texture_indices.resize(f.textures.size());
+                    f.texture_indices.push_back(bytes_of(entry["indices"], std::size_t(ref.width) * ref.height, where + ": `indices`"));
+                    f.texture_pixels.push_back(pixels_of(entry["table"], std::size_t(256) * ref.palette_rows, where + ": `table`"));
+                } else if (!entry["data"].is_null()) {
                     f.texture_pixels.push_back(pixels_of(entry["data"], std::size_t(ref.width) * ref.height, where));
                     ref.format = FORMAT_ARGB8888;
                 } else {
@@ -1167,6 +1360,17 @@ namespace eka2l1::enhance {
                     ref.format = format_of(entry["format"], "texture format", true);
                     ref.palette_format = (entry["paletteFormat"].is_null() || entry["paletteFormat"].string() == "none")
                         ? FORMAT_NONE : format_of(entry["paletteFormat"], "palette format", false);
+                    const bool paletted = (ref.format == FORMAT_P8) || (ref.format == FORMAT_P4);
+                    // Zero or none is the size of an entry, as for a profile.
+                    ref.palette_stride = (paletted && !entry["paletteStride"].is_null())
+                        ? number_of(entry["paletteStride"], where + ": `paletteStride`") : 0;
+                    if (paletted && !ref.palette_stride) {
+                        ref.palette_stride = bytes_per_pixel(ref.palette_format);
+                    }
+                    palette_rows_of(entry, paletted, ref.palette_rows, ref.palette_row_stride, where, "bad_frame", true);
+                    if (ref.palette_rows && !ref.palette_row_stride) {
+                        ref.palette_row_stride = ((ref.format == FORMAT_P4) ? 16 : 256) * ref.palette_stride;
+                    }
                     if (!entry["key"].is_null()) {
                         ref.has_key = true;
                         ref.key = number_of(entry["key"], where + ": `key`");
@@ -1174,6 +1378,10 @@ namespace eka2l1::enhance {
                 }
 
                 f.textures.push_back(ref);
+            }
+
+            if (!f.texture_indices.empty()) {
+                f.texture_indices.resize(f.textures.size());
             }
         }
 
