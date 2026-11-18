@@ -48,10 +48,43 @@ namespace eka2l1::control {
         const int w = std::max(1, int(std::round(width * scale))), h = std::max(1, int(std::round(height * scale)));
         require(std::uint64_t(w) * h <= 64 * 1024 * 1024, "too_large", "image exceeds 64 megapixels", 413);
         std::string raw((std::size_t(w) * 4 + 1) * h, 0);
+        // Each output pixel is the average of the source pixels whose centres
+        // fall inside it, or, when the picture is enlarged, the one under its
+        // own centre. The screen texture is drawn at the scale the frontend
+        // shows it at, often a fraction: at 3.4 each guest pixel is a block of
+        // three or four texels, so averaging the block gives that pixel back
+        // exactly, and text the window server drew at the full scale comes out
+        // smoothed rather than with strokes missing. Taking one texel at the
+        // block's edge, as before, landed on the previous block for one row
+        // and column in three or four, and small text lost whole rows of
+        // pixels in every screenshot.
+        auto spans = [](int out_size, int in_size, double ratio) {
+            std::vector<std::pair<int, int>> result(out_size);
+            for (int i = 0; i < out_size; ++i) {
+                int first = std::max(0, int(std::ceil(i * ratio - 0.5)));
+                int end = std::min(in_size, int(std::ceil((i + 1) * ratio - 0.5)));
+                if (end <= first) {
+                    first = std::min(in_size - 1, int((i + 0.5) * ratio));
+                    end = first + 1;
+                }
+                result[i] = { first, end };
+            }
+            return result;
+        };
+        // The texture holds the whole screen, cut to whole texels, so its size
+        // over the picture's is the scale a full-screen draw was made at.
+        const auto rows = spans(h, height, double(height) / h), cols = spans(w, width, double(width) / w);
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
-                const auto src = (std::size_t(std::min(height - 1, int(y / scale))) * width + std::min(width - 1, int(x / scale))) * 4;
-                std::copy_n(pixels.data() + src, 4, raw.data() + std::size_t(y) * (w * 4 + 1) + 1 + x * 4);
+                std::uint32_t sum[4] = {};
+                for (int sy = rows[y].first; sy < rows[y].second; ++sy)
+                    for (int sx = cols[x].first; sx < cols[x].second; ++sx)
+                        for (int c = 0; c < 4; ++c)
+                            sum[c] += pixels[(std::size_t(sy) * width + sx) * 4 + c];
+                const std::uint32_t count = std::uint32_t(rows[y].second - rows[y].first) * (cols[x].second - cols[x].first);
+                char *dest = raw.data() + std::size_t(y) * (w * 4 + 1) + 1 + x * 4;
+                for (int c = 0; c < 4; ++c)
+                    dest[c] = char((sum[c] + count / 2) / count);
             }
         auto put32 = [](std::string &out, std::uint32_t n) { for (int shift : {24,16,8,0}) out += char(n >> shift); };
         std::string out("\x89PNG\r\n\x1a\n", 8);

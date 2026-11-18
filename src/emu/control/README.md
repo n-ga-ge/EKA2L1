@@ -43,7 +43,12 @@ not provide this ordering contract.
 API touches bypass host UI event delivery. Guest coordinates refer to guest
 pixels; normalized coordinates are relative to the guest picture. Qt and Android
 support these two spaces. iOS additionally supports render-surface coordinates.
-The native screenshot path reads the guest render texture. Only iOS currently
+The native screenshot path reads the guest render texture. That texture is
+drawn at the scale the frontend shows the screen at, often a fraction (3.4
+times the guest's size, say); the screenshot brings it back to the guest's
+size (or `scale` times that) by averaging the texels whose centres fall in
+each pixel, so a guest pixel drawn as a block of texels keeps its own value
+and text drawn at the full scale comes out smoothed. Only iOS currently
 supports a screenshot of the entire host window. Accelerometer injection uses
 the guest device's natural axes in m/s², or g with `unit: "g"`. Android and iOS
 provide an override; Qt reports this capability as unavailable because its null
