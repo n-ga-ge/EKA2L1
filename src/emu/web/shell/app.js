@@ -7,10 +7,15 @@
 //
 // A game can be loaded four ways:
 //   - ?g=<slug>, on a site with a game catalogue (see catalog.js): the game
-//     and the firmware come from the site
+//     and the firmware come from the site. An entry with "platform": "ngage2"
+//     is an N-Gage 2.0 game, which runs on a phone instead (ngage2.js)
 //   - URL parameters, for links that start the game by themselves:
 //       ?fw=<url>     N-Gage firmware ROM dump (needed once; it is kept)
 //       ?game=<url>   game card dump (.zip/.7z/.rar)
+//     or, for an N-Gage 2.0 game:
+//       ?device=<url> the phone's device zip (tools/devices/ on the site's side)
+//       ?app=<url>    the N-Gage application (.sis), optional
+//       ?game=<url>   a zip holding the game's .n-gage file, or that file
 //   - the "Load from URL" button, which takes the same two URLs and puts them
 //     in the address bar so the page can be bookmarked or shared
 //   - files picked from this device
@@ -24,7 +29,7 @@
 //   ?touch=1|0    force the on-screen controls on or off
 //   ?fps=1        show frames per second in the status line
 //   ?memory=<MB>  the heap's ceiling, 1024 (default) to 2048; an N-Gage 2.0
-//                 phone needs 2048
+//                 game gets 2048 without asking, which its phone needs
 //   ?diag=1       show the performance overlay (see diag/hud.js)
 //   ?room=<code>  join that multiplayer room once the game is running (see
 //                 net.js); an invite link is the game's link with this added
@@ -39,11 +44,12 @@ import { setupHud } from './diag/hud.js';
 import { formatText, redact } from './diag/report.js';
 import { SECTIONS } from './diag/sections.js';
 import { Eka2l1 } from './eka2l1-client.js';
-import { NGAGE_KEYS, STANDARD_PROFILE, keyName, padName } from './games.js';
+import { NGAGE_KEYS, keyName, padName } from './games.js';
 import { Input } from './input.js';
 import { Downloads, LoadError, beginLoad, fileSource, wantedFromParams } from './loader.js';
+import { PHONE_CLOCK_MS, PHONE_MEMORY_MB, ngageFile, standInInstall } from './ngage2.js';
 import { MAX_PLAYERS, NAME_LENGTH, RelayTransport, Session, cleanCode, cleanGame, cleanName, errorText, gameFromUid, publicRooms, relayBase, relayHealthy } from './net.js';
-import { autoProfile, gameProfiles, lookUpEnhancement, lookUpGame, lookUpProfile, profileById, siteLinks, switchBindings } from './profiles.js';
+import { autoProfile, gameProfiles, isStandard, lookUpEnhancement, lookUpGame, lookUpProfile, profileById, siteLinks, standardProfile, switchBindings, usePlatform } from './profiles.js';
 import { downloadBlob, exportFileName, exportSaves, importSaves, listSaves } from './saves.js';
 import { saveSettings, settings } from './settings.js';
 import { detectSupport } from './support.js';
@@ -65,7 +71,11 @@ const page = {
   site: null, // config.json, when the host provides one
   downloads: null, // promise of the download cache (loader.js)
   app: null, // { uid, name } of the running game
-  source: null, // { fw, game } URLs the running game came from, or { slug }
+  source: null, // { fw, game } URLs the running game came from, { device, app, game }, or { slug }
+  // What this session runs: 'ngage' (the original N-Gage) or 'ngage2' (an
+  // N-Gage 2.0 phone), decided before the emulator starts.
+  platform: 'ngage',
+  phone: { device: false, app: false }, // what of the phone is installed in this session
   screen: { width: 176, height: 208 },
   paused: false,
   userPaused: false,
@@ -189,6 +199,7 @@ async function launch(app) {
 
   const status = await page.emu.call('GET', '/v1/status');
   if (status.screen && status.screen.width) page.screen = { width: status.screen.width, height: status.screen.height };
+  if (page.platform === 'ngage2') followScreen();
 
   applyBindings();
   applyDisplay();
@@ -198,9 +209,97 @@ async function launch(app) {
   if (page.net) page.net.release();
 }
 
+// An N-Gage 2.0 game turns the phone's screen to landscape some time after it
+// starts: follow the screen's size, so that the picture keeps its shape.
+let screenTimer = 0;
+function followScreen() {
+  if (screenTimer) return;
+  screenTimer = setInterval(async () => {
+    if (!page.app || page.paused) return;
+    const response = await page.emu.request('GET', '/v1/status').catch(() => null);
+    const screen = response && response.ok ? response.json().screen : null;
+    if (screen && screen.width && screen.height && (screen.width !== page.screen.width || screen.height !== page.screen.height)) {
+      page.screen = { width: screen.width, height: screen.height };
+      applyDisplay();
+    }
+  }, 2000);
+}
+
+// Uploads `source` as `name`, hands its path to `install`, and removes the
+// upload again. A file the emulator refuses is not offered again from the cache.
+async function installFile(source, name, install) {
+  try {
+    return await install(await page.emu.uploadFrom(name, source));
+  } catch (error) {
+    // `kept`: the failure is not the file's.
+    if (source.key && !error.kept) await (await page.downloads).remove(source.key);
+    throw error;
+  } finally {
+    await page.emu.request('DELETE', `/v1/files?path=${encodeURIComponent('docs:/uploads/' + name)}`);
+  }
+}
+
+// Makes the phone an N-Gage 2.0 game runs on ready, once per session: the
+// device, a clock its N-Gage application accepts, and the application, which
+// lives on drive E and so has to be installed again every session.
+async function preparePhone(load) {
+  if (page.platform !== 'ngage2') {
+    throw new LoadError('wrong-platform', 'This is an N-Gage 2.0 game, and this page has started the original N-Gage. Reload the page to start it.');
+  }
+  if (page.emu.memoryMB && page.emu.memoryMB < PHONE_MEMORY_MB) {
+    throw new Error(`An N-Gage 2.0 game needs ${PHONE_MEMORY_MB} MB of memory, and this browser allows the emulator only ${page.emu.memoryMB} MB.`);
+  }
+  if (!page.phone.device) {
+    const phone = await load.phone;
+    if (!phone || !phone.device) throw new LoadError('no-firmware', 'Enter the URL of the phone\'s device zip too; none is installed yet.');
+    showStep('Installing the phone…');
+    await installFile(phone.device, 'device.zip', (path) => page.emu.call('POST', '/v1/devices', { archive: path }));
+    // The device boots with the host's date; the application's certificates expired in 2019.
+    await page.emu.call('PUT', '/v1/clock', { unixMs: PHONE_CLOCK_MS });
+    page.phone.device = true;
+    performance.mark('eka2l1:device-installed');
+  }
+  load.installed('device');
+  if (!page.phone.app) {
+    const phone = await load.phone;
+    if (phone && phone.app) {
+      showStep('Installing the N-Gage application…');
+      await installFile(phone.app, 'ngage.sis', (path) => page.emu.call('POST', '/v1/apps', { path, type: 'sis' }));
+      page.phone.app = true;
+    }
+  }
+  load.installed('app');
+}
+
+// Installs an N-Gage 2.0 game (a zip holding its .n-gage file, or that file)
+// on the phone and starts it.
+async function installPhoneGame(source, expected) {
+  showStep(`Installing ${expected && expected.title ? expected.title : 'game'}…`);
+  const file = await ngageFile(source);
+  const base = expected && expected.slug ? expected.slug : 'game';
+  const installed = await installFile({ ...file, key: source.key }, `${base}.n-gage`, async (path) => {
+    const response = await page.emu.request('POST', '/v1/apps', { path, type: 'ngage2-direct' });
+    // An emulator from before that install type: the page's stand-in (ngage2.js).
+    if (response.status === 400 && /unknown install type/.test(response.text())) {
+      return standInInstall(page.emu, file, base, expected && expected.uid).catch((error) => { throw Object.assign(error, { kept: true }); });
+    }
+    if (!response.ok) throw new Error(`The game could not be installed (${response.status}): ${response.text()}`);
+    return response.json();
+  });
+  const uid = expected && expected.uid ? String(expected.uid).toLowerCase() : null;
+  const app = (installed.added || []).find((item) => String(item.uid).toLowerCase() === uid) || (installed.added || [])[0];
+  if (!app) throw new Error('No game was found in the N-Gage 2.0 file');
+  performance.mark('eka2l1:game-installed');
+  progress.load = null; // from here the status line belongs to the game
+  await launch(app);
+}
+
 // Puts a card dump in the slot and starts the game on it. `expected` is what
 // the catalogue says about the game ({ title, uid }), when it is known.
 async function installAndLaunch(source, name, expected = null) {
+  if (page.platform === 'ngage2') {
+    throw new LoadError('wrong-platform', 'This page has started an N-Gage 2.0 phone. Reload the page to load an original N-Gage game.');
+  }
   showStep(`Installing ${expected && expected.title ? expected.title : 'game'}…`);
   await removeCard();
 
@@ -235,7 +334,9 @@ async function finishLoad(load) {
     showStep('Loading…');
     const target = await load.target;
 
-    if (!(await hasDevice())) {
+    if (target.platform === 'ngage2') {
+      await preparePhone(load);
+    } else if (!(await hasDevice())) {
       const firmware = await load.firmware;
       if (!firmware) throw new LoadError('no-firmware', 'Enter the URL of an N-Gage firmware dump too; none is installed yet.');
       await installFirmware(firmware);
@@ -244,11 +345,14 @@ async function finishLoad(load) {
 
     showStep('Loading…');
     const card = await load.card;
-    await installAndLaunch(card, target.name, target);
+    if (target.platform === 'ngage2') await installPhoneGame(card, target);
+    else await installAndLaunch(card, target.name, target);
     load.installed('game');
 
     if (target.slug) {
       page.source = { slug: target.slug };
+    } else if (target.platform === 'ngage2') {
+      page.source = { device: load.wanted.device, app: load.wanted.app || '', game: target.gameUrl };
     } else {
       page.source = { fw: load.wanted.fw || '', game: target.gameUrl };
       settings.urls = { fw: load.wanted.fw || settings.urls.fw, game: target.gameUrl };
@@ -279,6 +383,10 @@ function shareLink() {
   if (page.source.slug) {
     link.searchParams.set('g', page.source.slug);
     return link.href;
+  }
+  if (page.source.device) {
+    link.searchParams.set('device', page.source.device);
+    if (page.source.app) link.searchParams.set('app', page.source.app);
   }
   if (page.source.fw) link.searchParams.set('fw', page.source.fw);
   link.searchParams.set('game', page.source.game);
@@ -443,7 +551,7 @@ function followCatalogue() {
   }
 
   const chosen = settings.profile;
-  if (chosen !== 'auto' && chosen !== STANDARD_PROFILE.id && chosen !== askedProfile) {
+  if (chosen !== 'auto' && !isStandard(chosen) && chosen !== askedProfile) {
     askedProfile = chosen;
     lookUpProfile(chosen).then((profile) => {
       if (profile && settings.profile === chosen) profilesChanged();
@@ -480,8 +588,8 @@ function applyBindings() {
     caption.title = action;
   }
 
-  const line = profile === STANDARD_PROFILE ? '' : summary(profile);
-  $('help').textContent = profile === STANDARD_PROFILE
+  const line = profile === standardProfile() ? '' : summary(profile);
+  $('help').textContent = profile === standardProfile()
     ? 'Arrows move · Enter OK · Q / W soft keys · 0–9 keypad · - ✱ · = # · Backspace clear. Menu → Guide lists every control.'
     : `${profile.name} layout${line ? `: ${line}` : ''}. Menu → Guide lists every control.`;
 }
@@ -505,7 +613,7 @@ function renderControls() {
   const bindings = effectiveBindings(profile);
 
   const select = $('profile-select');
-  const options = [['auto', `Automatic (${autoProfile(page.app ? page.app.uid : null).name})`], [STANDARD_PROFILE.id, STANDARD_PROFILE.name],
+  const options = [['auto', `Automatic (${autoProfile(page.app ? page.app.uid : null).name})`], [standardProfile().id, standardProfile().name],
     ...gameProfiles().map((game) => [game.id, game.name])];
   select.replaceChildren(...options.map(([value, label]) => el('option', { value }, label)));
   // A layout chosen by name that is not known (any more) behaves as automatic.
@@ -1084,7 +1192,7 @@ function renderGuide() {
         el('td', null, profile.actions[id] || label), el('td', null, label), el('td', null, names(id, 'keyboard')), el('td', null, names(id, 'gamepad'))))))),
     el('ul', null, (profile.notes || []).map((note) => el('li', null, el('span'), el('span', null, note)))));
   if (profile.source) parts.push(el('p', { class: 'hint' }, `Where these controls come from: ${profile.source}`));
-  if (game && !game.hasControls && profile === STANDARD_PROFILE) {
+  if (game && !game.hasControls && profile === standardProfile()) {
     parts.push(el('p', { class: 'hint' }, 'Nobody has written down what the keys do in this game yet, so this is the phone\'s own layout. Its help or options screen usually lists them.'));
   }
   parts.push(el('p', { class: 'hint' }, `On a touch screen the same N-Gage keys are on screen: the pad, OK and C on the left, the two soft keys above, and the number keys on the right${described ? ', labelled with what they do in this game' : ''}. `
@@ -1628,13 +1736,22 @@ async function main() {
     return;
   }
 
+  // What the game runs on decides the memory, which is fixed once the
+  // emulator has started: an N-Gage 2.0 phone needs more.
+  // Bounded: a catalogue that does not answer must not keep the emulator from
+  // starting (the load then reports what is wrong).
+  const unknown = new Promise((resolve) => setTimeout(() => resolve('ngage'), 10000));
+  page.platform = early ? await Promise.race([early.platform.catch(() => 'ngage'), unknown]) : 'ngage';
+  usePlatform(page.platform);
+  const memoryMB = params.has('memory') ? Number(params.get('memory')) : (page.platform === 'ngage2' ? PHONE_MEMORY_MB : undefined);
+
   const emu = new Eka2l1();
   page.emu = emu;
   window.eka2l1 = emu;
 
   showStep('Starting emulator…');
   try {
-    await emu.start({ canvas, persist, memoryMB: params.has('memory') ? Number(params.get('memory')) : undefined });
+    await emu.start({ canvas, persist, memoryMB });
   } catch (error) {
     stopLoad(early);
     throw error;

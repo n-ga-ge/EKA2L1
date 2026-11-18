@@ -14,6 +14,10 @@
 //   "assets"   base URL the game files are served from; a game's card is
 //              <assets>games/<slug>.zip unless its entry has an absolute "zip".
 //   "fw"       URL of the firmware.
+//   "ngage2Device", "ngage2App"
+//              URLs of what an N-Gage 2.0 game needs instead (an entry with
+//              "platform": "ngage2"): the phone's device zip and the N-Gage
+//              application.
 // Other keys of config.json are read elsewhere: "home" and "docs" (the menu's
 // links back to the site, profiles.js), "cacheMB" (the size bound of the
 // download cache, loader.js, which also reads <catalog>assets.json) and
@@ -99,4 +103,17 @@ export async function gameUrl(game) {
 // The site's firmware URL, or null.
 export async function firmwareUrl() {
   return (await siteConfig()).fw || null;
+}
+
+// What a catalogue entry runs on: 'ngage' (the original N-Gage, the default)
+// or 'ngage2' (N-Gage 2.0 on a phone).
+export function platformOf(game) {
+  return game && game.platform === 'ngage2' ? 'ngage2' : 'ngage';
+}
+
+// The site's URLs of the N-Gage 2.0 phone's files, { device, app }, either
+// null when the site has none.
+export async function phoneUrls() {
+  const config = await siteConfig();
+  return { device: config.ngage2Device || null, app: config.ngage2App || null };
 }
