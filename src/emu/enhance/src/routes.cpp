@@ -285,7 +285,7 @@ namespace eka2l1::enhance {
         static const char *depths[] = { "none", "less", "lequal", "greater", "gequal" };
 
         json::array vertices;
-        vertices.reserve(f.vertices.size() * 7);
+        vertices.reserve(f.vertices.size() * 8);
         for (const vertex &v : f.vertices) {
             vertices.push_back(static_cast<double>(v.x));
             vertices.push_back(static_cast<double>(v.y));
@@ -294,6 +294,7 @@ namespace eka2l1::enhance {
             vertices.push_back(static_cast<double>(v.u));
             vertices.push_back(static_cast<double>(v.v));
             vertices.push_back(static_cast<std::int64_t>(v.color));
+            vertices.push_back(static_cast<double>(v.row));
         }
 
         json::array draws;
@@ -310,6 +311,8 @@ namespace eka2l1::enhance {
                 { "pitch", static_cast<std::int64_t>(t.pitch) }, { "format", format_name(t.format) },
                 { "palette", hex(t.palette) }, { "paletteFormat", format_name(t.palette_format) },
                 { "paletteStride", static_cast<std::int64_t>(t.palette_stride) },
+                { "paletteRows", static_cast<std::int64_t>(t.palette_rows) },
+                { "paletteRowStride", static_cast<std::int64_t>(t.palette_row_stride) },
                 { "key", t.has_key ? json(hex(t.key)) : json(nullptr) } });
         }
 
@@ -322,7 +325,7 @@ namespace eka2l1::enhance {
 
         return { { "frame", static_cast<std::int64_t>(f.number) }, { "process", hex(f.process_uid) },
             { "width", static_cast<std::int64_t>(f.width) }, { "height", static_cast<std::int64_t>(f.height) },
-            { "vertexLayout", json::array{ "x", "y", "z", "w", "u", "v", "color" } },
+            { "vertexLayout", json::array{ "x", "y", "z", "w", "u", "v", "color", "row" } },
             { "vertices", vertices }, { "draws", draws }, { "textures", textures }, { "target", target } };
     }
 
@@ -657,7 +660,8 @@ namespace eka2l1::enhance {
             if (!decode(shown->process_uid, wanted, rgba)) {
                 throw api_error(422, "unreadable", "the pixels could not be read from guest memory");
             }
-            return pixels_response(wanted.width, wanted.height, rgba);
+            // A texture with palette rows is all of them, one under another.
+            return pixels_response(wanted.width, wanted.height * std::max<std::uint32_t>(wanted.palette_rows, 1), rgba);
         }
 
         throw api_error(404, "not_found", "unknown endpoint; see GET /v1");

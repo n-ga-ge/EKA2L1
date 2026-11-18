@@ -57,7 +57,7 @@ namespace eka2l1::enhance {
     };
 
     struct vertex_spec {
-        expr x, y, z, w, u, v, color, r, g, b, a;
+        expr x, y, z, w, u, v, color, r, g, b, a, row;
     };
 
     struct texture_spec {
@@ -66,6 +66,8 @@ namespace eka2l1::enhance {
         texture_format format = FORMAT_NONE;
         texture_format palette_format = FORMAT_NONE;
         std::uint32_t palette_stride = 0;
+        std::uint32_t palette_rows = 0;
+        std::uint32_t palette_row_stride = 0;
     };
 
     struct target_spec {
@@ -143,6 +145,12 @@ namespace eka2l1::enhance {
         // a texture is made of, to see whether it changed without decoding it.
         bool decode_locked(std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint32_t> &rgba);
         bool hash_locked(std::uint32_t process_uid, const texture_ref &texture, std::uint64_t &hash);
+
+        // A texture with palette rows as its texel indices (width times
+        // height bytes) and its table (entries times rows 0xAABBGGRR words,
+        // the key's entry transparent in every row). With the kernel lock held.
+        bool decode_table_locked(std::uint32_t process_uid, const texture_ref &texture, std::vector<std::uint8_t> &indices,
+            std::vector<std::uint32_t> &table);
 
         /**
          * The guest is presenting its screen. The frame being captured, if it

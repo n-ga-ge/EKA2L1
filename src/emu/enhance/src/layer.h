@@ -91,6 +91,9 @@ namespace eka2l1::enhance {
             std::uint32_t inline_index = 0;
 
             drivers::handle handle = 0;
+            // A texture with palette rows: `handle` holds its texel indices,
+            // this its table.
+            drivers::handle table = 0;
             std::uint64_t hash = 0;
             std::uint64_t last_used = 0;
             std::uint64_t last_checked = 0;
@@ -125,7 +128,7 @@ namespace eka2l1::enhance {
         drivers::handle compose_program_ = 0;
         drivers::handle vertex_buffer_ = 0;
         drivers::handle input_layout_ = 0;
-        int texture_loc_ = -1, mode_loc_ = -1, triangle_screen_loc_ = -1, view_loc_ = -1;
+        int texture_loc_ = -1, mode_loc_ = -1, triangle_screen_loc_ = -1, view_loc_ = -1, table_loc_ = -1;
         int screen_loc_ = -1, params_loc_ = -1;
         bool resources_failed_ = false;
         std::atomic<bool> broken_{ false };
@@ -145,7 +148,7 @@ namespace eka2l1::enhance {
         bool ensure_resources(drivers::graphics_driver *driver);
         void drop_textures(drivers::graphics_command_builder *builder);
         void prepare_textures(drivers::graphics_command_builder &builder, const frame &f, bool linear,
-            std::vector<drivers::handle> &handles);
+            std::vector<drivers::handle> &handles, std::vector<drivers::handle> &tables);
         bool render(epoc::screen *scr, drivers::graphics_driver *driver, const std::shared_ptr<const frame> &shown, bool linear,
             bool from_screen = false);
         bool compose_picture(epoc::screen *scr, drivers::graphics_driver *driver, bool from_screen);
