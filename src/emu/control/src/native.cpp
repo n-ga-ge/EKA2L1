@@ -536,6 +536,12 @@ namespace eka2l1::control {
                 auto size = scr->current_mode().size * scr->display_scale_factor;
                 std::vector<std::uint8_t> pixels(std::size_t(size.x) * size.y * 4);
                 require(drivers::read_bitmap(sys().get_graphics_driver(), scr->screen_texture, point(0, 0), size, 32, pixels.data()), "capture_failed", "screen readback failed");
+                // A phone's screen is opaque, and so is every host's view of it. The screen
+                // texture's alpha is whatever the last drawing left: a GLES surface copied
+                // into it brings its own, often 0, which made the 3D of N-Gage 2.0 games
+                // transparent (white in most viewers) in the PNG.
+                for (std::size_t i = 3; i < pixels.size(); i += 4)
+                    pixels[i] = 0xFF;
                 double scale = 1;
                 try {
                     scale = std::stod(req.param("scale", "1"));
