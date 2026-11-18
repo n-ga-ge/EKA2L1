@@ -121,3 +121,6 @@
 [submodule "src/external/opencore-amr"]
 	path = src/external/opencore-amr
 	url = https://git.code.sf.net/p/opencore-amr/code
+[submodule "src/external/minimp3"]
+	path = src/external/minimp3
+	url = https://github.com/lieff/minimp3
