@@ -319,6 +319,12 @@ endif()
 if (EKA2L1_HAVE_FFMPEG)
     target_link_libraries(drivers PRIVATE ffmpeg)
     target_compile_definitions(drivers PRIVATE EKA2L1_HAS_FFMPEG=1)
+else()
+    # Without FFmpeg the DSP output stream decodes MP3 itself (src/audio/dsp.cpp).
+    target_sources(drivers PRIVATE
+        include/drivers/audio/backend/minimp3/mp3_minimp3.h
+        src/audio/backend/minimp3/mp3_minimp3.cpp)
+    target_link_libraries(drivers PRIVATE minimp3)
 endif()
 if (ANDROID)
     target_link_libraries(drivers PRIVATE android)

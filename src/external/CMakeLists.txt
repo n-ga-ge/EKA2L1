@@ -346,6 +346,10 @@ if((NOT EKA2L1_IOS OR EKA2L1_IOS_ENABLE_FFMPEG) AND NOT EKA2L1_WEB)
     set(EKA2L1_HAVE_FFMPEG ON CACHE INTERNAL "FFmpeg is available for this build" FORCE)
 else()
     set(EKA2L1_HAVE_FFMPEG OFF CACHE INTERNAL "FFmpeg is available for this build" FORCE)
+
+    # minimp3 (CC0): decodes MP3 for the DSP output stream when FFmpeg is not built.
+    add_library(minimp3 INTERFACE)
+    target_include_directories(minimp3 INTERFACE minimp3)
 endif()
 
 option(CAPSTONE_BUILD_SHARED "Build shared library" OFF)
