@@ -23,6 +23,8 @@
 
 #if EKA2L1_HAS_FFMPEG
 #include <drivers/video/backend/ffmpeg/video_player_ffmpeg.h>
+#else
+#include <drivers/video/backend/null/video_player_null.h>
 #endif
 
 namespace eka2l1::drivers {
@@ -31,7 +33,7 @@ namespace eka2l1::drivers {
         return std::make_unique<video_player_ffmpeg>(drv);
 #else
         (void)drv;
-        return nullptr;
+        return std::make_unique<video_player_null>();
 #endif
     }
 }

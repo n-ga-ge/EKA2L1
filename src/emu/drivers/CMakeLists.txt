@@ -105,6 +105,7 @@ add_library(drivers
         include/drivers/location/location.h
         include/drivers/sensor/sensor.h
         include/drivers/video/video.h
+        include/drivers/video/backend/null/video_player_null.h
         src/driver.cpp
         src/itc.cpp
         src/audio/audio.cpp
@@ -134,6 +135,7 @@ add_library(drivers
         src/sensor/backend/null/sensor_null.cpp
         src/sensor/sensor.cpp
         src/video/video.cpp
+        src/video/backend/null/video_player_null.cpp
         ${DRIVERS_AUDIOUNIT_IOS_SRC}
         ${DRIVERS_CUBEB_SRC}
         ${DRIVERS_FFMPEG_SRC}
