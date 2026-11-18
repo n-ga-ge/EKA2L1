@@ -124,7 +124,13 @@ namespace eka2l1::web {
                 // say where a pointer position on the canvas is on the screen.
                 scr->logic_scale_factor_x = scale_x;
                 scr->logic_scale_factor_y = scale_y;
-                scr->try_change_display_rescale(symsys->get_graphics_driver(), 1.0f);
+                // The 3D of an enhanced game is the exception: the GPU layer
+                // draws it at its own scale, and the shader enlarges that.
+                float own = 1.0f;
+                if (epoc::screen_compositor *const composing = scr->compositor.load()) {
+                    own = composing->screen_scale(scr, own);
+                }
+                scr->try_change_display_rescale(symsys->get_graphics_driver(), own);
             } else {
                 // The window server draws the screen at the size it is shown
                 // at: text and shapes at full detail, the bitmaps a game draws
