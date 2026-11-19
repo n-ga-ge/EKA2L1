@@ -54,6 +54,8 @@ export class Eka2l1 {
     this.pending = new Map();
     this.listeners = new Set();
     this.audio = null;
+    this.audioError = null;
+    this.audioStarting = null;
     // Whether this build takes a file in pieces (see uploadFrom).
     this.pieces = false;
   }
@@ -260,21 +262,40 @@ export class Eka2l1 {
       return;
     }
 
+    // A click and a key press close together must not start two outputs
+    // that play from the one ring.
+    if (!this.audioStarting) {
+      this.audioStarting = this.startAudio(baseUrl).finally(() => { this.audioStarting = null; });
+    }
+    await this.audioStarting;
+  }
+
+  async startAudio(baseUrl) {
     const ring = this.module._eka2l1_web_audio_ring();
     if (!ring) return;
 
-    const context = new AudioContext({ latencyHint: 'interactive' });
-    this.module._eka2l1_web_audio_set_rate(context.sampleRate);
-    await context.audioWorklet.addModule(baseUrl + 'audio-worklet.js');
+    let context = null;
+    try {
+      context = new AudioContext({ latencyHint: 'interactive' });
+      this.module._eka2l1_web_audio_set_rate(context.sampleRate);
+      await context.audioWorklet.addModule(baseUrl + 'audio-worklet.js');
 
-    const node = new AudioWorkletNode(context, 'eka2l1-ring', {
-      numberOfInputs: 0,
-      numberOfOutputs: 1,
-      outputChannelCount: [2],
-      processorOptions: { memory: this.module.wasmMemory, ring },
-    });
-    node.connect(context.destination);
 
+      const node = new AudioWorkletNode(context, 'eka2l1-ring', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+        processorOptions: { memory: this.module.wasmMemory, ring },
+      });
+      node.connect(context.destination);
+    } catch (error) {
+      // Why sound could not be started, for the diagnostics (diag/audio.js).
+      this.audioError = String(error && error.message ? error.message : error);
+      if (context) context.close().catch(() => {});
+      throw error;
+    }
+
+    this.audioError = null;
     this.audio = context;
     await context.resume();
   }
