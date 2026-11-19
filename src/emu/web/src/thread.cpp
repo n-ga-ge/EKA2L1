@@ -4,6 +4,7 @@
 
 #include <common/log.h>
 #include <common/thread.h>
+#include <common/webdiag/graphics.h>
 #include <drivers/audio/audio.h>
 #include <drivers/graphics/graphics.h>
 #include <system/devices.h>
@@ -98,6 +99,10 @@ namespace eka2l1::web {
 
     static void os_thread_entry(emulator &state) {
         common::set_thread_name("Symbian OS thread");
+
+        // The diagnostics count the game's waiting for the graphics thread,
+        // and this is the thread the game runs on.
+        webdiag::guest_thread = true;
 
         while (!state.should_emu_quit) {
             try {

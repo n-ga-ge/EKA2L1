@@ -7,6 +7,7 @@
 #include <common/log.h>
 #include <common/path.h>
 #include <common/version.h>
+#include <common/webdiag/graphics.h>
 #include <dispatch/libraries/register.h>
 #include <drivers/audio/audio.h>
 #include <drivers/graphics/graphics.h>
@@ -23,6 +24,8 @@
 #include <services/window/screen.h>
 #include <services/window/window.h>
 
+#include <chrono>
+
 namespace eka2l1::web {
     void emulator::register_draw_callback() {
         if (!winserv) {
@@ -38,8 +41,14 @@ namespace eka2l1::web {
                 }
 
                 // Wait for the previous present, so frames are not queued
-                // faster than the page can show them.
+                // faster than the page can show them. The wait is timed for
+                // the diagnostics: it is how long the game stands still for
+                // the picture.
+                const auto wait_started = std::chrono::steady_clock::now();
                 state_ptr->graphics_driver->wait_for(&state_ptr->present_status);
+
+                webdiag::graphics.note_present_wait(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - wait_started).count()));
 
                 drivers::graphics_command_builder builder;
                 state_ptr->draw(builder, scr);
