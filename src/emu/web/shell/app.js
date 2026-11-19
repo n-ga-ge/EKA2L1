@@ -23,7 +23,7 @@
 //   ?cache=<MB>   size bound of the download cache (see loader.js)
 //   ?touch=1|0    force the on-screen controls on or off
 //   ?fps=1        show frames per second in the status line
-//   ?diag=1       show the performance overlay (see diag/hud.js)
+//   ?diag=1|0     show or hide the performance overlay (see diag/hud.js)
 //   ?room=<code>  join that multiplayer room once the game is running (see
 //                 net.js); an invite link is the game's link with this added
 //
@@ -330,7 +330,7 @@ function wireSetup() {
     const link = shareLink();
     if (link) {
       const next = new URL(link);
-      for (const key of ['log', 'persist', 'touch', 'fps', 'room']) {
+      for (const key of ['log', 'persist', 'touch', 'fps', 'diag', 'room']) {
         if (params.has(key)) next.searchParams.set(key, params.get(key));
       }
       history.replaceState(null, '', next);
