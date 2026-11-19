@@ -2779,10 +2779,6 @@ DISPATCH : {
 #endif
             }
 
-#if EKA2L1_PLATFORM(WEB)
-            eka2l1::webdiag::speed.cache_blocks.fetch_add(1, std::memory_order_relaxed);
-#endif
-
             if (cpu->NumInstrsToExecute != 1) {
                 if (InterpreterTranslateBlock(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
                     goto END;
@@ -2790,6 +2786,9 @@ DISPATCH : {
                 if (InterpreterTranslateSingle(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
                     goto END;
             }
+#if EKA2L1_PLATFORM(WEB)
+            eka2l1::webdiag::speed.cache_blocks.fetch_add(1, std::memory_order_relaxed);
+#endif
         }
 
         // Re-index: a flush above may have moved the slot; refill from the live

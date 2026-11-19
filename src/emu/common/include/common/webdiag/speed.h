@@ -102,17 +102,25 @@ namespace eka2l1::webdiag {
         std::atomic<std::uint64_t> instructions{ 0 };
         std::atomic<std::uint64_t> slices{ 0 };
 
+        // The interpreter's calls out to the emulator (cpu/src/dyncom/armstate.cpp):
+        // system calls, hooks and exceptions, and the time until they came
+        // back. That time is the emulator's own work for the guest (drawing,
+        // files, waiting for the picture before to be shown), not the guest's
+        // code; a call still under way is not in it yet.
+        std::atomic<std::uint64_t> calls{ 0 };
+        std::atomic<std::uint64_t> call_us{ 0 };
+
         // The timers (kernel/src/timing.cpp): events that came due, and how
-        // long after their time the timer thread got to them.
+        // long after their time the timer thread woke up for them.
         std::atomic<std::uint64_t> timers_fired{ 0 };
         std::atomic<std::uint64_t> timers_late_us{ 0 };
         std::atomic<std::uint64_t> timers_max_late_us{ 0 };
         std::atomic<std::uint64_t> timers_late_over[SPEED_TIMER_LATE_STEP_COUNT]{};
 
         // The interpreter's translation cache (cpu/src/dyncom): bytes in use
-        // after the last run, blocks of guest code handed to the translator,
-        // the times it filled up and was emptied, and the times it was emptied
-        // on request (the guest's code changed, or the system was reset).
+        // after the last run, blocks of guest code translated, the times it
+        // filled up and was emptied, and the times it was emptied on request
+        // (the guest's code changed, or the system was reset).
         std::atomic<std::uint64_t> cache_bytes{ 0 };
         std::atomic<std::uint64_t> cache_blocks{ 0 };
         std::atomic<std::uint64_t> cache_flushes{ 0 };
@@ -139,4 +147,20 @@ namespace eka2l1::webdiag {
     };
 
     inline speed_counters speed;
+
+    /// Lives for one call of the interpreter out to the emulator.
+    struct speed_call_scope {
+        const std::uint64_t started_us = speed_clock_us();
+
+        speed_call_scope() = default;
+        speed_call_scope(const speed_call_scope &) = delete;
+        speed_call_scope &operator=(const speed_call_scope &) = delete;
+
+        ~speed_call_scope() {
+            const std::uint64_t now = speed_clock_us();
+
+            speed.call_us.fetch_add(now > started_us ? now - started_us : 0, std::memory_order_relaxed);
+            speed.calls.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
 }

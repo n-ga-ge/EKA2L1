@@ -21,20 +21,30 @@
 //   pausedUs      the emulator was paused. Neither busy nor idle.
 //   instructions  ARM instructions executed.
 //   slices        runs of the interpreter they were executed in.
+//   calls         times the interpreter called out to the emulator: system
+//                 calls, hooks, exceptions.
+//   callUs        time until those calls came back: the emulator's own work
+//                 for the guest (drawing, files, waiting for the picture
+//                 before to be shown). A call still under way is not in it.
+//                 What is left of the busy time after callUs is the time the
+//                 guest's own code was interpreted.
 //   timers        events of the emulator's timer thread that came due:
 //                 `fired` of them, `lateUs` the sum of how long after their
-//                 time the thread got to them (the clock is read for each, so
-//                 an event that waited for the one before it counts as late),
-//                 `maxLateUs` the longest (a pause holds the timers back, so
-//                 this one can be the length of a pause), `lateOver` how many
-//                 were later than 1, 5, 20 and 100 ms. An event that was asked
-//                 for with a time already past counts as late by that much.
+//                 time the thread woke up for them, `maxLateUs` the longest
+//                 (a pause holds the timers back, so this one can be the
+//                 length of a pause), `lateOver` how many were later than 1,
+//                 5, 20 and 100 ms. It is the lateness of the thread's
+//                 wake-up, taken once for all the events that are due then:
+//                 the time an event then spends behind the callbacks of the
+//                 ones before it is the guest's own doing and is left out
+//                 (counted in, a game on an idle machine had 3.6% of its
+//                 timers more than 20 ms late). An event that was asked for
+//                 with a time already past counts as late by that much.
 //   cache         the interpreter's translation cache: `bytes` in use of
-//                 `sizeBytes`, `blocks` of guest code handed to the
-//                 translator, `flushes` (emptied because it was full) and
-//                 `clears` (emptied on request: the guest's code changed, as
-//                 when a program or library is loaded, or the system was
-//                 reset).
+//                 `sizeBytes`, `blocks` of guest code translated, `flushes`
+//                 (emptied because it was full) and `clears` (emptied on
+//                 request: the guest's code changed, as when a program or
+//                 library is loaded, or the system was reset).
 //
 // And, when the emulator can be looked into (see system_access) and has a
 // screen:
@@ -77,6 +87,8 @@ namespace eka2l1::web {
             { "pausedUs", static_cast<double>(counters.paused.read(now)) },
             { "instructions", number(counters.instructions) },
             { "slices", number(counters.slices) },
+            { "calls", number(counters.calls) },
+            { "callUs", number(counters.call_us) },
             { "timers", control::json({ { "fired", number(counters.timers_fired) },
                             { "lateUs", number(counters.timers_late_us) },
                             { "maxLateUs", number(counters.timers_max_late_us) },

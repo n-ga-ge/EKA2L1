@@ -172,7 +172,7 @@ namespace eka2l1 {
             unq.unlock();
 
 #if EKA2L1_PLATFORM(WEB)
-            webdiag::speed.timer_fired(teletimer_->microseconds() - evt.event_time);
+            webdiag::speed.timer_fired(global_timer - evt.event_time);
 #endif
 
             if (callback) {
