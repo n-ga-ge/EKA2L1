@@ -451,6 +451,16 @@ export class Downloads {
 
 // --- one download ----------------------------------------------------------------
 
+// What the diagnostics' start-up section (diag/startup.js) reads back: a mark
+// when a file is at hand, which says where its bytes came from ('cache': kept
+// here from an earlier visit; 'network'), how many there are, when the page
+// began to fetch it, and whether the server was asked if a kept copy is still
+// current. `url` is what was requested, so that the section can find the
+// browser's own record of the request; it never leaves the page.
+function markFetched(name, task, source) {
+  performance.mark(name, { detail: { from: task.from, bytes: task.loaded, began: task.began, asked: Boolean(task.asked), url: source.key } });
+}
+
 const validHash = (hash) => (hash && Number(hash.bytes) > 0 && /^[0-9a-f]{64}$/i.test(String(hash.sha256)) ? hash : null);
 
 // Makes sure `asset` ({ kind, label, url, expect }) is in the cache and
@@ -515,6 +525,7 @@ async function fetchAsset(store, asset, task, report, signal, keep, overflow = f
     } catch (error) {
       if (signal.aborted) throw error;
     }
+    task.asked = true;
     if (current) return fromCache();
   }
 
@@ -671,6 +682,7 @@ function taskText(task) {
 // ten times a second) whenever summary() would say something new;
 // `firmware: false` skips the firmware (one is installed already).
 export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: wantFirmware = true }) {
+  performance.mark('eka2l1:fetch-begin', { detail: { firmware: wantFirmware } }); // for the diagnostics, as markFetched
   const controller = new AbortController();
   const tasks = { fw: null, game: null };
   const sources = { fw: null, game: null };
@@ -698,9 +710,9 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
     if (!url) return (await downloads).firmware();
     const manifest = wanted.fw ? null : await assetsManifest();
     if (manifest && validHash(manifest.fw)) verify.fw = manifest.fw.sha256;
-    tasks.fw = { label: 'Firmware', from: null, loaded: 0, total: 0, done: false };
+    tasks.fw = { label: 'Firmware', from: null, loaded: 0, total: 0, done: false, began: performance.now() };
     sources.fw = await fetchAsset(downloads, { kind: 'fw', label: 'Firmware', url, expect: manifest && manifest.fw }, tasks.fw, report, controller.signal, keep);
-    performance.mark('eka2l1:firmware-fetched');
+    markFetched('eka2l1:firmware-fetched', tasks.fw, sources.fw);
     return sources.fw;
   })();
 
@@ -710,9 +722,9 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
       card = (async () => {
         const what = await target;
         if (what.expect) verify.game = what.expect.sha256;
-        tasks.game = { label: what.label, from: null, loaded: 0, total: 0, done: false };
+        tasks.game = { label: what.label, from: null, loaded: 0, total: 0, done: false, began: performance.now() };
         sources.game = await fetchAsset(downloads, { kind: 'game', label: what.label, url: what.gameUrl, expect: what.expect }, tasks.game, report, controller.signal, keep);
-        performance.mark('eka2l1:game-fetched');
+        markFetched('eka2l1:game-fetched', tasks.game, sources.game);
         return sources.game;
       })();
       card.catch(() => {});
@@ -760,7 +772,9 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
   };
 }
 
-// A file picked from this device, as a source.
+// A file picked from this device, as a source. The mark is for the
+// diagnostics, as in markFetched.
 export function fileSource(file) {
+  performance.mark('eka2l1:file-picked', { detail: { bytes: file.size } });
   return { key: null, bytes: file.size, open: async () => file.stream() };
 }

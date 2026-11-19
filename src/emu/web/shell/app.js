@@ -179,6 +179,7 @@ async function removeCard() {
 async function launch(app) {
   setStatus(`Starting ${app.name}…`);
   await page.emu.call('POST', `/v1/apps/${app.uid}/launch`);
+  performance.mark('eka2l1:launched'); // read back by the diagnostics, as the mark in wireSetup
   page.app = app;
   page.paused = false;
   page.userPaused = false;
@@ -313,6 +314,7 @@ async function showSetup() {
 function wireSetup() {
   const run = (work) => async () => {
     setup.hidden = true;
+    performance.mark('eka2l1:load-begin'); // where the diagnostics count the wait from (diag/startup.js)
     try {
       await work();
       canvas.focus();
