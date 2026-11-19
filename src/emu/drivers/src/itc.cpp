@@ -47,13 +47,14 @@ namespace eka2l1::drivers {
         cmd_list.size_ = 1;
         *cmd_list.base_ = cmd;
 
-#if EKA2L1_PLATFORM(WEB)
-        webdiag::graphics.sync_commands.fetch_add(1, std::memory_order_relaxed);
-        const webdiag::timed waited(webdiag::graphics.sync_wait_us);
-#endif
-
         std::unique_lock<std::mutex> ulock(drv->mut_);
         drv->submit_command_list(cmd_list);
+
+#if EKA2L1_PLATFORM(WEB)
+        webdiag::graphics.sync_commands.fetch_add(webdiag::guest_thread ? 1 : 0, std::memory_order_relaxed);
+        const webdiag::timed waited(webdiag::graphics.sync_wait_us, webdiag::guest_thread);
+#endif
+
         drv->cond_.wait(ulock, [&]() { return status != -100; });
 
         return status;

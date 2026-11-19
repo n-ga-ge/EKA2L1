@@ -20,18 +20,31 @@ import { number, percent, rows } from './dom.js';
 // few readings, short enough that the dialog shows what the visitor just did.
 const RECENT_S = 5;
 
-// The game stood still this share of the time, waiting for the frame before
-// to be presented. A quarter means it would draw a third more frames with a
-// picture that cost nothing, a half twice as many.
+// Slow drawing shows in one of two ways, and each has its own sign.
+//
+// On the processor (software rendering) drawing holds the graphics thread:
+// its calls into WebGL return when the work is done. The thread is then busy
+// this share of the time or more (a fifth: on a graphics card it is a
+// twentieth), and half of the time is bad. How long the game waits meanwhile
+// varies from run to run, probably because the processor that draws is also
+// taken from the game, which then has less to wait for.
+const BUSY_SLOW = 0.2;
+const BUSY_BAD = 0.5;
+// On a graphics card that cannot keep up the thread stays free, and the
+// browser calls for fewer animation frames instead: fewer than this a second
+// (a display is drawn 60 times a second or more; 30 on some in a saving
+// mode). What the game asks of the graphics thread is answered at the next
+// call, so the game then stands still for it: this share of the time or
+// more. A quarter means it would draw a third more frames with a picture
+// that cost nothing, a half twice as many. Waiting alone is no fault: a game
+// waits some milliseconds on every frame of a healthy page too.
+const FEW_FRAMES = 40;
 const WAIT_WARN = 0.25;
 const WAIT_BAD = 0.5;
-// Waiting does no harm above this frame rate: N-Gage games draw 10 to 20
+// None of it matters above this frame rate: N-Gage games draw 10 to 20
 // frames a second, and a game that loops as fast as it can waits for the
 // display on every frame of a perfectly good 60.
-const WAIT_MATTERS_BELOW_FPS = 25;
-// The graphics thread spent this share of the time drawing. On hardware it
-// is under a tenth.
-const BUSY_WARN = 0.5;
+const SLOW_BELOW_FPS = 25;
 // The timer does a frame's work about 30 times a second when no animation
 // frame comes. Fewer than this in a second and it was a hiccup, not a page
 // the browser has stopped drawing.
@@ -80,7 +93,8 @@ export function between(a, b) {
     submitWaitShare: per(submitWaitMs, seconds * 1000),
     longWaits: grown('presentWaitsLong'),
     // The browser: animation frames it gave a second (the display's rate for
-    // a page it shows), and what the timer did in their place.
+    // a page it shows), and what the timer did in their place. For a whole
+    // stretch collect() replaces the rate by animationFrames()'s.
     animationRate: per(grown('animationCalls'), seconds),
     timerRate: per(grown('timerCalls'), seconds),
     timerFrames,
@@ -118,24 +132,75 @@ function timerDrew(rates) {
 
 const noAnimationFrames = (now) => Boolean(now) && now.seconds >= 2 && timerDrew(now);
 
-// Seconds of a stretch in which the timer drew in place of animation frames.
-export function timerSeconds(samples) {
+// A stretch second by second: the seconds in which the timer drew in place
+// of animation frames, and the animation frames a second in the others, which
+// is the pace the browser drew the page at while it did. Both null on a build
+// without the counters; the rate also when the timer drew throughout.
+export function animationFrames(samples) {
+  let known = false;
+  let timerSeconds = 0;
   let seconds = 0;
+  let calls = 0;
   for (let i = 1; i < samples.length; i++) {
     const rates = between(samples[i - 1], samples[i]);
-    if (timerDrew(rates)) seconds += rates.seconds;
+    if (!rates || rates.animationRate === null || rates.timerRate === null) continue;
+    known = true;
+    if (timerDrew(rates)) {
+      timerSeconds += rates.seconds;
+    } else {
+      seconds += rates.seconds;
+      calls += rates.animationRate * rates.seconds;
+    }
   }
-  return seconds;
+  return { timerSeconds: known ? timerSeconds : null, animationRate: seconds > 0 ? calls / seconds : null };
 }
 
-// Whether the picture holds the game back, and how badly: null, 'warn' or 'bad'.
+// Whether the picture holds the game back: null when it does not, else
+// { level, drawing, waiting, fewFrames }: how badly, whether drawing held the
+// graphics thread, whether the game waited for slow drawing, and whether the
+// browser called for few animation frames.
 function bound(data) {
-  const waiting = data.waitShare !== null && data.fps !== null && data.fps < WAIT_MATTERS_BELOW_FPS && data.waitShare >= WAIT_WARN;
-  if (waiting && data.waitShare >= WAIT_BAD) return 'bad';
-  return waiting || (data.busyShare !== null && data.busyShare >= BUSY_WARN) ? 'warn' : null;
+  if (data.fps === null || data.fps >= SLOW_BELOW_FPS) return null;
+  const busy = data.busyShare === null ? 0 : data.busyShare;
+  const wait = data.waitShare === null ? 0 : data.waitShare;
+  // No animation frames because the browser had stopped drawing the page is
+  // another matter (no-animation-frames): the rate is of the seconds in which
+  // the timer did not draw, and says nothing when those were the lesser part.
+  const timed = data.timerSeconds !== null && data.timerSeconds >= data.measuredS / 2;
+  const fewFrames = data.animationRate !== null && data.animationRate < FEW_FRAMES && !timed;
+  const drawing = busy >= BUSY_SLOW;
+  const waiting = (drawing || fewFrames) && wait >= WAIT_WARN;
+  if (!drawing && !waiting) return null;
+  return { level: busy >= BUSY_BAD || (waiting && wait >= WAIT_BAD) ? 'bad' : 'warn', drawing, waiting, fewFrames };
 }
 
-const cheapFilter = (canvas) => !canvas || canvas.filter === 'nearest' || canvas.filter === 'linear';
+// The scaling choices that cost next to nothing; every other one is a shader
+// with real work per pixel of the canvas.
+const cheapFilter = (canvas) => !canvas || ['nearest', 'linear', 'sharp_bilinear'].includes(canvas.filter);
+
+// A scale as the Display dialog names it: "4×", or "3.3×" when it follows the canvas.
+const times = (scale) => `${number(scale, Number.isInteger(scale) ? 0 : 1)}×`;
+
+// The running game's 3D drawn again above its own size (app.js keeps what it
+// knows in page.enhance; null for a game without a profile): the scale the
+// emulator said it draws at, 0 when it is off, and how the flat picture and
+// the textures are enlarged, which is work for the graphics card too.
+function layerOf(enhance) {
+  if (!enhance) return null;
+  const answer = enhance.answer || {};
+  const scale = Number.isFinite(answer.scale) && answer.scale > 0 ? answer.scale : 0;
+  return {
+    engine: String(enhance.engine || ''),
+    // false: the profile does not fit this copy of the game, so its 3D stays
+    // the game's own, while the picture is still enlarged to the scale.
+    matches: typeof answer.active === 'boolean' ? answer.active : null,
+    scale,
+    auto: Boolean(scale && answer.auto),
+    flat: scale && answer.flat ? String(answer.flat) : null,
+    textures: scale && answer.filter ? String(answer.filter) : null,
+    failed: Boolean(answer.layerFailed),
+  };
+}
 
 export default {
   id: 'graphics',
@@ -155,10 +220,13 @@ export default {
       longWaits: null, animationRate: null, timerFrames: null, timerShare: null,
     };
     const { seconds, timerRate, ...rates } = measured || none;
+    const paced = measured ? animationFrames(stretch.samples) : { timerSeconds: null, animationRate: null };
     return {
       renderer: gl && gl.renderer ? String(gl.renderer) : null,
       software: Boolean(gl && gl.software),
       canvas: surface ? { width: surface.width, height: surface.height, filter: surface.filter, fill: surface.fill } : null,
+      screen: ctx.page.screen ? { width: ctx.page.screen.width, height: ctx.page.screen.height } : null,
+      layer: layerOf(ctx.page.enhance),
       // null on a build whose emulator does not say.
       contextLost: emulator && typeof emulator.contextLost === 'boolean' ? emulator.contextLost : null,
       contextLosses: emulator ? finite(emulator.contextLosses) : null,
@@ -168,8 +236,10 @@ export default {
       // Over the last stretch of play (core.js: span()).
       measuredS: measured ? seconds : 0,
       ...rates,
-      // Seconds of it in which the timer drew in place of animation frames.
-      timerSeconds: measured && rates.timerShare !== null ? timerSeconds(stretch.samples) : null,
+      // Seconds of it in which the timer drew in place of animation frames,
+      // and the animation frames a second in the rest of it.
+      timerSeconds: paced.timerSeconds,
+      animationRate: paced.animationRate,
     };
   },
 
@@ -198,33 +268,37 @@ export default {
           + (heavy ? ' Here the picture costs enough to slow the game down.' : ''),
         advice: 'Switch on graphics acceleration in the browser\'s settings (Chrome and Edge: Settings, System; Firefox: Settings, General, Performance) and restart the browser.'
           + ' A remote desktop or a virtual machine often has no graphics card to use.'
-          + ' Until then choose "Sharp pixels" or "Smooth" and a small resolution in Menu, Display.',
+          + ' Until then choose "Sharp pixels" or "Smooth" as "Scaling" and a small "Resolution" in Menu, Display, and leave "3D resolution" off.',
       });
     }
 
     if (heavy) {
-      const waiting = data.waitShare !== null && data.waitShare >= WAIT_WARN && data.fps !== null && data.fps < WAIT_MATTERS_BELOW_FPS;
+      const { waiting } = heavy;
       const parts = [];
       if (waiting) {
-        parts.push(`Over ${over} the game stood still ${percent(data.waitShare)} of the time, waiting for its last frame to be shown, and drew ${number(data.fps, 1)} frames a second.`);
-        if (data.animationRate !== null && data.animationRate < 45 && (data.timerShare === null || data.timerShare < 0.5)) {
-          parts.push(`The browser drew this page only ${number(data.animationRate)} times a second.`);
-        }
+        parts.push(`Over ${over} the game stood still ${percent(data.waitShare)} of the time, waiting for its picture to be drawn, and showed ${number(data.fps, 1)} frames a second.`);
+        if (heavy.fewFrames) parts.push(`The browser drew this page only ${number(data.animationRate)} times a second.`);
       }
-      if (data.busyShare !== null && (data.busyShare >= BUSY_WARN || waiting)) {
-        parts.push(`Drawing took ${percent(data.busyShare)} of the time${data.busyMsPerFrame === null ? '' : ` (${number(data.busyMsPerFrame, 1)} ms a frame)`}.`);
+      if (heavy.drawing) {
+        parts.push(`${waiting ? 'Drawing' : `Over ${over} drawing the picture`} took ${percent(data.busyShare)} of the time${data.busyMsPerFrame === null ? '' : ` (${number(data.busyMsPerFrame, 1)} ms a frame)`}`
+          + `${waiting ? '' : `, and the game showed ${number(data.fps, 1)} frames a second`}.`);
       }
       const big = data.canvas ? `${data.canvas.width}×${data.canvas.height}` : null;
+      const layered = Boolean(data.layer && data.layer.scale > 1 && !data.layer.failed);
       found.push({
         code: 'graphics-bound',
-        level: heavy,
-        title: waiting ? 'The game waits for the picture' : 'Drawing the picture takes most of the time',
+        level: heavy.level,
+        title: waiting ? 'The game waits for the picture' : 'Drawing the picture takes much of the time',
         detail: parts.join(' '),
-        advice: (cheapFilter(data.canvas) ? 'In Menu, Display choose a smaller resolution'
-          : 'In Menu, Display choose the filter "Smooth" or "Sharp pixels" and a smaller resolution')
-          + (big ? ` (the picture is drawn at ${big} now).` : '.')
+        // The costliest setting first.
+        advice: `In Menu, Display: ${[
+          layered ? `set "3D resolution" lower or to "Off" (it is ${times(data.layer.scale)} now)` : null,
+          cheapFilter(data.canvas) ? null : 'choose "Sharp pixels" or "Smooth" as "Scaling"',
+          `choose a smaller "Resolution"${big ? ` (the picture is drawn at ${big} now)` : ''}`,
+        ].filter(Boolean).join('; ')}.`
           + (data.software ? ' The lasting fix is to switch on graphics acceleration in the browser.'
-            : ' Close other tabs and programs that draw a lot (video, 3D), and switch off the battery saver, which lets the browser draw less often.'),
+            : ' Close other tabs and programs that draw a lot (video, 3D).'
+              + (heavy.fewFrames ? ' If none of this changes anything, the browser itself draws seldom: switch off battery saving, and look at the refresh rate the display is set to.' : '')),
       });
     }
 
@@ -260,6 +334,7 @@ export default {
 
   render(data) {
     const measured = data.measuredS > 0;
+    const heavy = bound(data);
     const stopped = noAnimationFrames(data.now);
     const browserDraws = stopped ? 'not at all now'
       : data.now && data.now.animationRate !== null ? `${number(data.now.animationRate)} times a second`
@@ -276,9 +351,20 @@ export default {
         value: `${data.canvas.width}×${data.canvas.height}, ${data.canvas.filter}`,
         note: data.canvas.fill && data.canvas.fill !== 'none' ? `Fill the screen: ${data.canvas.fill}.` : '',
       },
+      data.layer && {
+        label: 'The game\'s 3D',
+        value: data.layer.failed ? 'drawn by the game itself: drawing it again failed'
+          : !data.layer.scale ? 'drawn by the game itself'
+            : `${data.layer.matches === false ? 'drawn by the game itself, and the picture enlarged to' : 'drawn again at'} ${times(data.layer.scale)}`
+              + (data.screen ? ` (${Math.round(data.screen.width * data.layer.scale)}×${Math.round(data.screen.height * data.layer.scale)})` : ''),
+        note: data.layer.scale ? `${data.layer.matches === false ? 'What the site knows about this game does not fit this copy of it. ' : ''}Textures ${data.layer.textures === 'linear' ? 'smooth' : 'sharp'}; menus, text and logos ${
+          { scaler: 'through the pixel-art scaler', smooth: 'smooth', sharp: 'as sharp pixels' }[data.layer.flat] || data.layer.flat}.` : '',
+        mark: data.layer.failed ? 'warn' : undefined,
+      },
       data.contextLost !== null && {
         label: 'Graphics context',
-        value: data.contextLost ? 'lost' : data.contextLosses > 0 ? `lost ${data.contextLosses} times, back now` : 'working',
+        value: data.contextLost || data.contextLosses > 0 ? 'lost' : 'working',
+        note: data.contextLost || data.contextLosses > 0 ? 'The picture does not come back without reloading the page.' : '',
         mark: data.contextLost || data.contextLosses > 0 ? 'bad' : 'ok',
       },
       browserDraws && {
@@ -292,14 +378,14 @@ export default {
         label: 'Drawing',
         value: `${percent(data.busyShare)} of the time`,
         note: data.busyMsPerFrame === null ? 'No frame was drawn.' : `${number(data.busyMsPerFrame, 1)} ms a frame on the graphics thread.`,
-        mark: data.busyShare >= BUSY_WARN ? 'warn' : undefined,
+        mark: heavy && heavy.drawing ? (data.busyShare >= BUSY_BAD ? 'bad' : 'warn') : undefined,
       },
       measured && data.waitShare !== null && {
         label: 'The game waits for the picture',
         value: `${percent(data.waitShare)} of the time`,
         note: (data.waitMsPerFrame === null ? '' : `${number(data.waitMsPerFrame, 1)} ms a frame on average. `)
-          + (data.longWaits > 0 ? `${data.longWaits} waits were longer than a tenth of a second.` : ''),
-        mark: bound(data) && data.waitShare >= WAIT_WARN ? bound(data) : undefined,
+          + 'A little is normal: what the game asks of the graphics thread is answered at the next frame the browser draws.',
+        mark: heavy && heavy.waiting ? heavy.level : undefined,
       },
       data.testSwitch > 0 && { label: 'Test switch', value: `animation frames are switched off (mode ${data.testSwitch})`, mark: 'warn' },
     ])];

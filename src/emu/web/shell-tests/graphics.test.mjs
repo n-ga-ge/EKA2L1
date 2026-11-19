@@ -9,7 +9,7 @@ import test from 'node:test';
 
 import { CODES } from '../shell/diag/codes.js';
 import { span } from '../shell/diag/core.js';
-import graphics, { between, recent, timerSeconds } from '../shell/diag/graphics.js';
+import graphics, { animationFrames, between, recent } from '../shell/diag/graphics.js';
 
 // A sample `second` seconds in, of a game at `fps` on a display the browser
 // draws `display` times a second, with the timer doing `timer` frames'
@@ -48,10 +48,10 @@ function sample(second, { fps = 20, display = 60, timer = 0, waitMs = 0, syncMs 
 
 const series = (seconds, options) => Array.from({ length: seconds + 1 }, (_, i) => sample(i, options));
 
-function collect(samples, { renderer = 'ANGLE (Intel, Mesa Intel(R) UHD Graphics, OpenGL ES 3.2)', software = false, surface = { width: 677, height: 800, filter: 'nearest', fill: 'none' } } = {}) {
+function collect(samples, { renderer = 'ANGLE (Intel, Mesa Intel(R) UHD Graphics, OpenGL ES 3.2)', software = false, surface = { width: 677, height: 800, filter: 'nearest', fill: 'none' }, enhance = null } = {}) {
   return graphics.collect({
     emu: {},
-    page: { support: { webgl: { ok: true, renderer, software } }, surface },
+    page: { support: { webgl: { ok: true, renderer, software } }, surface, screen: { width: 176, height: 208 }, enhance },
     samples,
     span: (seconds) => span(samples, seconds),
   });
@@ -169,11 +169,31 @@ test('graphics-bound: the game waits for its frames', () => {
   assert.match(found.title, /waits for the picture/);
   assert.match(found.detail, /30% of the time/);
   assert.match(found.detail, /only 15 times a second/);
-  assert.match(found.advice, /smaller resolution \(the picture is drawn at 677×800 now\)/);
+  assert.equal(found.advice.startsWith('In Menu, Display: choose a smaller "Resolution" (the picture is drawn at 677×800 now).'), true);
 
   assert.deepEqual(codes(collect(series(40, { fps: 10, display: 10, waitMs: 500 }))), ['graphics-bound:bad']);
   // Below a quarter of the time it is not worth a finding.
   assert.deepEqual(codes(collect(series(40, { fps: 18, waitMs: 200 }))), []);
+});
+
+test('graphics-bound: the waiting of a healthy page is no fault', () => {
+  // What a game asks of the graphics thread is answered at the next
+  // animation frame: with a few such commands a frame the wait adds up, on a
+  // page that draws 60 times a second with a graphics thread that is free.
+  const data = collect(series(40, { syncMs: 350 }));
+  assert.equal(data.waitShare, 0.35);
+  assert.deepEqual(codes(data), []);
+  // The same waiting with a graphics thread that is busy a third of the time.
+  assert.deepEqual(codes(collect(series(40, { syncMs: 350, busyMs: 330 }))), ['graphics-bound:warn']);
+});
+
+test('graphics-bound: a graphics card that cannot keep up', () => {
+  // The thread stays free, the browser calls for fewer frames, and the game
+  // waits for what it asked of the thread (measured with a canvas of
+  // 3520×4160 and FSR on integrated graphics: 15 calls a second, 32% waiting).
+  const data = collect(series(40, { fps: 6, display: 15, timer: 9, syncMs: 320, busyMs: 90 }));
+  assert.deepEqual(codes(data), ['graphics-bound:warn']);
+  assert.match(graphics.findings(data)[0].detail, /stood still 32% of the time.*only 15 times a second/);
 });
 
 test('graphics-bound: waiting at the display\'s own rate is no fault', () => {
@@ -182,13 +202,45 @@ test('graphics-bound: waiting at the display\'s own rate is no fault', () => {
   assert.deepEqual(codes(collect(series(40, { fps: 30, display: 30, waitMs: 700 }))), []);
 });
 
-test('graphics-bound: the graphics thread is busy most of the time', () => {
-  const busy = collect(series(40, { busyMs: 600 }), { surface: { width: 1056, height: 1248, filter: 'fsr_sharp', fill: 'none' } });
+test('graphics-bound: drawing holds the graphics thread', () => {
+  const surface = { width: 1056, height: 1248, filter: 'fsr_sharp', fill: 'none' };
+  const busy = collect(series(40, { busyMs: 300 }), { surface });
   assert.deepEqual(codes(busy), ['graphics-bound:warn']);
   const found = graphics.findings(busy)[0];
   assert.doesNotMatch(found.title, /waits/);
-  assert.match(found.detail, /60% of the time \(30\.0 ms a frame\)/);
-  assert.match(found.advice, /"Smooth" or "Sharp pixels"/);
+  assert.match(found.detail, /drawing the picture took 30% of the time \(15\.0 ms a frame\), and the game showed 20\.0 frames a second/);
+  assert.match(found.advice, /Display: choose "Sharp pixels" or "Smooth" as "Scaling"; choose a smaller "Resolution"/);
+  // Half of the time is bad, and a game that shows its frames all the same is not held back.
+  assert.deepEqual(codes(collect(series(40, { busyMs: 600 }), { surface })), ['graphics-bound:bad']);
+  assert.deepEqual(codes(collect(series(40, { fps: 60, busyMs: 300 }), { surface })), []);
+  // On a graphics card: 2 to 5%.
+  assert.deepEqual(codes(collect(series(40, { busyMs: 150 }), { surface })), []);
+});
+
+test('graphics-bound: software rendering with a costly filter, as measured twice', () => {
+  // FSR with sharpening at 1056×1248 on SwiftShader. The thread was held a
+  // third of the time both times; the game waited 49% in one run and 19% in
+  // the other.
+  const swiftshader = { renderer: 'SwiftShader', software: true, surface: { width: 1056, height: 1248, filter: 'fsr_sharp', fill: 'none' } };
+  assert.deepEqual(codes(collect(series(40, { fps: 3.5, display: 9, timer: 9, busyMs: 377, syncMs: 491 }), swiftshader)), ['software-rendering:bad', 'graphics-bound:warn']);
+  assert.deepEqual(codes(collect(series(40, { fps: 4, display: 9, timer: 9, busyMs: 336, syncMs: 189 }), swiftshader)), ['software-rendering:bad', 'graphics-bound:warn']);
+});
+
+test('the game\'s 3D drawn again: what the emulator said, and first in the advice', () => {
+  const profile = { engine: 'shadowkey', beta: true, note: '', state: 'ready', sent: { scale: 4, filter: 'nearest', flat: 'scaler' } };
+  const on = { ...profile, answer: { active: true, scale: 4, auto: false, filter: 'nearest', flat: 'scaler', layerFailed: false } };
+  assert.deepEqual(collect(series(40), { enhance: on }).layer, { engine: 'shadowkey', matches: true, scale: 4, auto: false, flat: 'scaler', textures: 'nearest', failed: false });
+  // Off, not answered yet, and a game without a profile.
+  assert.equal(collect(series(40), { enhance: { ...profile, answer: { active: true, scale: 0, filter: 'nearest', flat: 'scaler' } } }).layer.scale, 0);
+  assert.deepEqual(collect(series(40), { enhance: { ...profile, state: 'loading', answer: null } }).layer, { engine: 'shadowkey', matches: null, scale: 0, auto: false, flat: null, textures: null, failed: false });
+  assert.equal(collect(series(40), { enhance: { ...on, answer: { ...on.answer, active: false } } }).layer.matches, false);
+  assert.equal(collect(series(40)).layer, null);
+  assert.deepEqual(codes(collect(series(40), { enhance: on })), []);
+
+  const heavy = collect(series(40, { fps: 10, display: 10, waitMs: 500 }), { enhance: on, surface: { width: 704, height: 832, filter: 'fsr', fill: 'none' } });
+  const found = graphics.findings(heavy)[0];
+  assert.equal(found.code, 'graphics-bound');
+  assert.match(found.advice, /Display: set "3D resolution" lower or to "Off" \(it is 4× now\); choose "Sharp pixels" or "Smooth" as "Scaling"; choose a smaller "Resolution" \(the picture is drawn at 704×832 now\)\./);
 });
 
 test('no-animation-frames: a page in front that the browser does not draw is a warning', () => {
@@ -239,8 +291,50 @@ test('no-animation-frames: a picture too slow for animation frames is not a page
   const data = collect(samples);
   assert.equal(data.timerShare, 0.5);
   assert.equal(data.timerSeconds, 0);
-  assert.equal(timerSeconds(samples), 0);
+  assert.deepEqual(animationFrames(samples), { timerSeconds: 0, animationRate: 4 });
+  assert.deepEqual(codes(data), ['graphics-bound:bad']);
+});
+
+test('graphics-bound: seconds drawn by the timer do not count as few animation frames', () => {
+  // 16 seconds at the display's 60, then 14 with the page covered: the game
+  // waits a little more under the timer, and the browser was not slow.
+  const samples = series(40);
+  for (let i = 0; i <= 40; i++) {
+    const g = samples[i].diag.graphics;
+    const timed = Math.max(i - 26, 0);
+    g.timerCalls = timed * 30;
+    g.timerFrames = timed * 20;
+    g.animationCalls = (i - timed) * 60;
+    g.animationFrames = (i - timed) * 20;
+    g.syncWaitMs = (i - timed) * 150 + timed * 400;
+  }
+  const data = collect(samples);
+  assert.equal(data.timerSeconds, 14);
+  assert.equal(data.animationRate, 60);
+  assert.ok(data.waitShare > 0.25);
+  // The page counts as in front here, so the timer's seconds are a warning
+  // of their own. The picture is not called slow.
+  assert.deepEqual(codes(data), ['no-animation-frames:warn']);
+});
+
+test('graphics-bound: a still screen on a page the browser does not draw', () => {
+  // Nothing is presented, so there is no share of frames to speak of, and
+  // the timer's seconds must still be known.
+  const samples = series(40, { fps: 0, display: 0, timer: 30, syncMs: 400 });
+  const data = collect(samples);
+  assert.equal(data.timerShare, null);
+  assert.equal(data.timerSeconds, 30);
+  assert.equal(data.animationRate, null);
+  assert.deepEqual(codes(data), ['no-animation-frames:warn']);
+});
+
+test('graphics-bound: a display drawn 30 times a second is named as a possible cause', () => {
+  const data = collect(series(40, { display: 30, syncMs: 280 }));
   assert.deepEqual(codes(data), ['graphics-bound:warn']);
+  assert.match(graphics.findings(data)[0].detail, /only 30 times a second/);
+  assert.match(graphics.findings(data)[0].advice, /the browser itself draws seldom: switch off battery saving/);
+  // With a busy graphics thread and a full rate there is no such doubt.
+  assert.doesNotMatch(graphics.findings(collect(series(40, { syncMs: 350, busyMs: 330 })))[0].advice, /draws seldom/);
 });
 
 test('no-animation-frames: a hiccup is not one', () => {

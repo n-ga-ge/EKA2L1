@@ -23,10 +23,12 @@
 //   presentWaitsLong  waits of a tenth of a second or more
 //   syncCommands      draw commands the guest waited for because they return
 //                     something (a new bitmap, the pixels of one)
-//   syncWaitMs        time the guest waited for those, behind whatever the
-//                     graphics thread was drawing
+//   syncWaitMs        time the guest waited for those once they were in the
+//                     queue, behind whatever the graphics thread was drawing
 //   submitWaitMs      time the guest spent handing over command lists, which
 //                     is next to nothing unless the queue is full
+//                     (these three count on the guest's thread only: what the
+//                     page asks for, a screenshot, is not the game waiting)
 //   contextLost       the browser has taken the WebGL context away (seen by
 //                     the graphics thread, which looks about 30 times a second)
 //   contextLosses     how often that happened

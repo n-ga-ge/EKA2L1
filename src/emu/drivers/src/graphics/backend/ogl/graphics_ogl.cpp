@@ -1927,7 +1927,7 @@ namespace eka2l1::drivers {
         }
 
 #if EKA2L1_PLATFORM(WEB)
-        const webdiag::timed waited(webdiag::graphics.submit_wait_us);
+        const webdiag::timed waited(webdiag::graphics.submit_wait_us, webdiag::guest_thread);
 #endif
 
         list_queue.push(list);
@@ -2178,8 +2178,7 @@ namespace eka2l1::drivers {
             web_last_animation_frame = std::chrono::steady_clock::now();
             static_cast<ogl_graphics_driver *>(self)->run_until_present();
 
-            webdiag::graphics.animation_calls.fetch_add(1, std::memory_order_relaxed);
-            webdiag::graphics.animation_frames.fetch_add(static_cast<ogl_graphics_driver *>(self)->presented_ ? 1 : 0, std::memory_order_relaxed);
+            webdiag::graphics.note_call(false, static_cast<ogl_graphics_driver *>(self)->presented_);
         };
 
         web_last_animation_frame = std::chrono::steady_clock::now();
@@ -2208,8 +2207,7 @@ namespace eka2l1::drivers {
 
             static_cast<ogl_graphics_driver *>(self)->run_until_present();
 
-            webdiag::graphics.timer_calls.fetch_add(1, std::memory_order_relaxed);
-            webdiag::graphics.timer_frames.fetch_add(static_cast<ogl_graphics_driver *>(self)->presented_ ? 1 : 0, std::memory_order_relaxed);
+            webdiag::graphics.note_call(true, static_cast<ogl_graphics_driver *>(self)->presented_);
         }, TIMER_INTERVAL_MS, this);
 
         emscripten_set_main_loop_arg(animation_frame, this, 0, true);

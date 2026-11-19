@@ -35,8 +35,11 @@ namespace eka2l1::webdiag {
         // The other two places where the guest stands still for the graphics
         // thread. A command that returns something (a new bitmap, the pixels
         // of one) is waited for, behind whatever the thread is drawing
-        // (drivers/src/itc.cpp). And the queue of command lists has an end:
-        // handing over a list waits when it is full (submit_command_list).
+        // (drivers/src/itc.cpp): the wait is timed from when the command is
+        // in the queue. And the queue of command lists has an end: handing
+        // over a list waits when it is full (submit_command_list). Both count
+        // on the guest's thread only (`guest_thread` below): a screenshot the
+        // page asks for waits in the same places, and the game does not.
         std::atomic<std::uint64_t> sync_commands{ 0 };
         std::atomic<std::uint64_t> sync_wait_us{ 0 };
         std::atomic<std::uint64_t> submit_wait_us{ 0 };
@@ -45,6 +48,12 @@ namespace eka2l1::webdiag {
         // graphics thread last saw it, and how often that happened.
         std::atomic<bool> context_lost{ false };
         std::atomic<std::uint64_t> context_losses{ 0 };
+
+        // One call of the graphics thread by the browser or by the timer.
+        void note_call(const bool by_timer, const bool presented) {
+            (by_timer ? timer_calls : animation_calls).fetch_add(1, std::memory_order_relaxed);
+            (by_timer ? timer_frames : animation_frames).fetch_add(presented ? 1 : 0, std::memory_order_relaxed);
+        }
 
         void note_present_wait(const std::uint64_t microseconds) {
             presents.fetch_add(1, std::memory_order_relaxed);
@@ -69,24 +78,32 @@ namespace eka2l1::webdiag {
 
     inline graphics_counters graphics;
 
-    // Adds the time it lives to a counter, in microseconds: one line times
-    // the rest of a block.
+    // True on the thread that runs the guest (set by the frontend's OS
+    // thread), so that only the game's own waiting is counted as such.
+    inline thread_local bool guest_thread = false;
+
+    // Adds the time it lives to a counter, in microseconds, when `counting`
+    // is set: one line times the rest of a block.
     struct timed {
-        explicit timed(std::atomic<std::uint64_t> &total)
-            : total_(total)
-            , started_(std::chrono::steady_clock::now()) {
+        timed(std::atomic<std::uint64_t> &total, const bool counting)
+            : total_(counting ? &total : nullptr) {
+            if (total_) {
+                started_ = std::chrono::steady_clock::now();
+            }
         }
 
         ~timed() {
-            total_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - started_).count()), std::memory_order_relaxed);
+            if (total_) {
+                total_->fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - started_).count()), std::memory_order_relaxed);
+            }
         }
 
         timed(const timed &) = delete;
         timed &operator=(const timed &) = delete;
 
     private:
-        std::atomic<std::uint64_t> &total_;
+        std::atomic<std::uint64_t> *total_;
         std::chrono::steady_clock::time_point started_;
     };
 }
