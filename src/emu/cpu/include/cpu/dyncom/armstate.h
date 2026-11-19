@@ -21,6 +21,7 @@
 #include <common/bytes.h>
 #include <common/types.h>
 #include <unordered_map>
+#include <vector>
 
 #include <cpu/12l1r/tlb.h>
 #include <cpu/dyncom/arm_regformat.h>
@@ -374,6 +375,11 @@ public:
     // code itself changes (handled separately via imb_range / clear).
     std::unordered_map<std::uint64_t, std::size_t> instruction_cache;
     std::uint32_t instruction_cache_asid = 0;
+
+    // Sorted addresses a hook instruction is emitted in front of (see
+    // arm::core::set_hooks). Changing it needs the cache cleared.
+    std::vector<std::uint32_t> hook_addrs;
+    void RaiseHook(const std::uint32_t addr);
 
 #ifdef EKA2L1_DYNCOM_PROFILE
     // Guest-execution profiler scratch (see arm_dyncom_interpreter.cpp): the

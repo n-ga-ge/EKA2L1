@@ -46,6 +46,10 @@ canvas { display: block; width: 100%; height: 100%; object-fit: contain; image-r
    which stretching would enlarge into a visible line. */
 #stage[data-fill="stretch"] #canvas { object-fit: fill; position: relative; left: -.3%; top: -.25%; width: 100.6%; height: 100.5%; }
 #stage[data-fill="ambient"] #canvas { position: relative; }
+/* Display → Resolution, the two choices that follow the window: app.js gives
+   the canvas the size of its own pixels and its place in the stage, so that
+   the browser shows it pixel for pixel instead of scaling it again. */
+#stage #canvas.exact { position: absolute; object-fit: fill; }
 #stage[data-fill="ambient"] #backdrop { display: block; position: absolute; inset: 0; object-fit: cover; image-rendering: auto; pointer-events: none; }
 /* Where the canvas cannot blur its own picture (backdrop.js) it is blurred
    here, and made larger than the stage by the reach of the blur so that the

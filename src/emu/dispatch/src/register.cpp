@@ -107,6 +107,7 @@ namespace eka2l1::dispatch {
         BRIDGE_REGISTER_DISPATCHER(0x81, evideo_player_register_window),
         BRIDGE_REGISTER_DISPATCHER(0x82, evideo_player_set_display_rect),
         BRIDGE_REGISTER_DISPATCHER(0x83, evideo_player_open_file),
+        BRIDGE_REGISTER_DISPATCHER(0x84, evideo_player_open_des),
         BRIDGE_REGISTER_DISPATCHER(0x85, evideo_player_play),
         BRIDGE_REGISTER_DISPATCHER(0x86, evideo_player_pause),
         BRIDGE_REGISTER_DISPATCHER(0x87, evideo_player_stop),

@@ -86,10 +86,13 @@ add_dependencies(eka2l1_web eka2l1_web_shell)
 # The whole emulator runs in a worker (PROXY_TO_PTHREAD) so its blocking loops
 # never stall the page; the canvas is handed to the graphics thread as an
 # OffscreenCanvas. WASMFS keeps file I/O on the calling thread instead of
-# proxying every call to the page. Memory starts small and grows; the ceiling is
-# kept at 1 GB because some mobile browsers reserve a shared memory's maximum
-# up front and refuse larger ones. A Shadowkey session peaks under 500 MB of
-# heap, about 200 MB of it in use.
+# proxying every call to the page. Memory starts small and grows. The page
+# creates the memory itself (IMPORTED_MEMORY, see eka2l1-client.js) and picks
+# its ceiling: 1 GB by default, because some mobile browsers reserve a shared
+# memory's maximum up front and refuse larger ones, and up to the 2 GB the
+# module allows when it asks for more. A Shadowkey session peaks under 500 MB of
+# heap, about 200 MB of it in use; an N-Gage 2.0 phone (S60 3rd Edition)
+# reserves address space for every process's heap and needs more than 1 GB.
 target_link_options(eka2l1_web PRIVATE
         -sPROXY_TO_PTHREAD=1
         -sOFFSCREENCANVAS_SUPPORT=1
@@ -98,7 +101,8 @@ target_link_options(eka2l1_web PRIVATE
         -sWASMFS=1
         -sALLOW_MEMORY_GROWTH=1
         -sINITIAL_MEMORY=167772160
-        -sMAXIMUM_MEMORY=1073741824
+        -sMAXIMUM_MEMORY=2147483648
+        -sIMPORTED_MEMORY=1
         -sPTHREAD_POOL_SIZE=12
         -sSTACK_SIZE=2097152
         -sDEFAULT_PTHREAD_STACK_SIZE=2097152
