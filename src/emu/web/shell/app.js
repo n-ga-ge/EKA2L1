@@ -39,6 +39,7 @@
 
 import { Backdrop } from './backdrop.js';
 import { Diagnostics } from './diag/core.js';
+import { endedStatus } from './diag/errors.js';
 import { helpLink } from './diag/help.js';
 import { setupHud } from './diag/hud.js';
 import { formatText, redact } from './diag/report.js';
@@ -71,6 +72,7 @@ const page = {
   site: null, // config.json, when the host provides one
   downloads: null, // promise of the download cache (loader.js)
   app: null, // { uid, name } of the running game
+  ended: null, // set once that game has closed or crashed by itself, or the emulator has stopped (onEmulatorEvent)
   source: null, // { fw, game } URLs the running game came from, { device, app, game }, or { slug }
   // What this session runs: 'ngage' (the original N-Gage) or 'ngage2' (an
   // N-Gage 2.0 phone), decided before the emulator starts.
@@ -190,6 +192,8 @@ async function removeCard() {
 
 async function launch(app) {
   setStatus(`Starting ${app.name}…`);
+  if (!(page.ended && page.ended.stopped)) page.ended = null;
+  page.launched = Date.now();
   await page.emu.call('POST', `/v1/apps/${app.uid}/launch`);
   performance.mark('eka2l1:launched'); // read back by the diagnostics, as the mark in wireSetup
   page.app = app;
@@ -205,6 +209,8 @@ async function launch(app) {
   applyBindings();
   applyDisplay();
   setStatus(app.name);
+  // It can have ended already, before the launch request was answered.
+  if (page.ended) showEnded();
   refreshControls();
   // After a restart in a multiplayer room: the link comes up again.
   if (page.net) page.net.release();
@@ -1540,8 +1546,50 @@ async function setPaused(paused, byUser) {
   refreshControls();
 }
 
+// The game closed or crashed by itself, or the emulator stopped. The picture
+// just stands still then, so the status line says what happened and how to
+// go on. How the game ended is in the emulator's diagnostics (diag/errors.js).
+// page.ended is { end } (the emulator's record of the ending, or null when it
+// has none) or { stopped: true }, until the next launch.
+function showEnded() {
+  if (page.ended.stopped) {
+    setStatus('The emulator has stopped. Reload the page to start again; Menu → Diagnostics says more.', true);
+  } else if (page.app) {
+    const status = endedStatus(page.app.name, page.ended.end);
+    setStatus(status.text, status.error);
+  }
+}
+
+async function onEmulatorEvent(name) {
+  if (name === 'emulator-stopped' || name === 'aborted' || name === 'broken') {
+    page.ended = { stopped: true };
+    showEnded();
+    return;
+  }
+  if (name !== 'app-exited') return;
+  // The launch this ending belongs to. The game can end before the launch
+  // request is answered (page.app is not set yet), and the visitor can start
+  // it again while the emulator is asked how it ended.
+  const launched = page.launched;
+  let end = null;
+  try {
+    const res = await page.emu.request('GET', '/v1/web/diag');
+    end = (res.ok ? ((res.json().exits || {}).lastApps || []).slice(-1)[0] : null) || null;
+  } catch (error) {
+    console.warn(error);
+  }
+  // An ending from before this launch is of the game that ran before.
+  if (page.launched !== launched || (end && end.at < launched)) return;
+  if (page.ended && page.ended.stopped) return;
+  page.ended = { end };
+  if (page.input) page.input.releaseAll();
+  showEnded();
+}
+
 async function restart() {
   if (!page.emu || !page.app) return;
+  // A stopped emulator answers no request: say so again and leave it.
+  if (page.ended && page.ended.stopped) { showEnded(); return; }
   const app = page.app;
   page.app = null;
   refreshControls();
@@ -1616,7 +1664,7 @@ function wireControls() {
     } catch {
       setStatus(link);
     }
-    setTimeout(() => { if (page.app && !statusEl.classList.contains('error')) setStatus(page.app.name); }, 4000);
+    setTimeout(() => { if (page.ended) showEnded(); else if (page.app && !statusEl.classList.contains('error')) setStatus(page.app.name); }, 4000);
   });
   entry('m-guide', () => { renderGuide(); $('guide').showModal(); });
   entry('m-info', async () => {
@@ -1686,7 +1734,7 @@ function startFpsReadout() {
     page.fps = ((frames - lastFrames) * 1000) / (now - lastTime);
     lastFrames = frames;
     lastTime = now;
-    if (params.get('fps') === '1' && page.app && !page.paused) setStatus(`${page.app.name} · ${page.fps.toFixed(1)} fps`);
+    if (params.get('fps') === '1' && page.app && !page.paused && !page.ended) setStatus(`${page.app.name} · ${page.fps.toFixed(1)} fps`);
   }, 1000);
 }
 
@@ -1756,6 +1804,7 @@ async function main() {
     throw error;
   }
 
+  emu.onEvent((name) => { onEmulatorEvent(name).catch(reportError); });
   page.input = new Input((scancode, down) => { if (!page.paused) emu.key(scancode, down); });
   page.input.attachKeyboard();
   page.input.attachButtons(document.body);

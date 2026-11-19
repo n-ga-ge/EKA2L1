@@ -15,6 +15,9 @@ export const KEYS = {
   0: 0x30, 1: 0x31, 2: 0x32, 3: 0x33, 4: 0x34, 5: 0x35, 6: 0x36, 7: 0x37, 8: 0x38, 9: 0x39,
 };
 
+// How many of the emulator's last log lines are kept for a diagnostics report.
+const LOG_KEEP = 100;
+
 // How much of a file goes to the emulator in one request.
 const PIECE_BYTES = 4 * 1024 * 1024;
 
@@ -58,6 +61,33 @@ export class Eka2l1 {
     this.audioStarting = null;
     // Whether this build takes a file in pieces (see uploadFrom).
     this.pieces = false;
+    // The emulator's last log lines for a report: the last LOG_KEEP different
+    // ones by text, each with when it last came and how often, and how many
+    // lines there were in all. They still go to the console (or to onLog).
+    this.logKept = new Map();
+    this.logLines = 0;
+    // { t, message } once the wasm module has aborted.
+    this.aborted = null;
+    // { t, message } once one of the emulator's threads has broken off (a
+    // trap in its code, or the one an abort ends in): the first time.
+    this.broken = null;
+  }
+
+  keepLog(line) {
+    this.logLines++;
+    const text = String(line);
+    // A line that came before moves to the end with its count: a game that
+    // logs the same few lines every frame must not push everything else out.
+    const before = this.logKept.get(text);
+    this.logKept.delete(text);
+    this.logKept.set(text, { t: performance.now(), line: text, times: before ? before.times + 1 : 1 });
+    if (this.logKept.size > LOG_KEEP) this.logKept.delete(this.logKept.keys().next().value);
+  }
+
+  // The kept log lines, the one that came last at the end: [{ t, line, times }]
+  // with t from performance.now().
+  get logTail() {
+    return [...this.logKept.values()];
   }
 
   // Loads the wasm module and resolves once the emulator core is up.
@@ -66,7 +96,11 @@ export class Eka2l1 {
   // refuses a larger one gets 1024; `memoryMB` on the instance says what it got.
   async start({ canvas, baseUrl = HERE, onLog = null, persist = true, memoryMB = DEFAULT_MEMORY_MB } = {}) {
     let ready;
-    const whenReady = new Promise((resolve) => { ready = resolve; });
+    let failed;
+    const whenReady = new Promise((resolve, reject) => { ready = resolve; failed = reject; });
+    // An abort while the module is still being set up fails start() below by
+    // another way; this one must then not count as a failure nobody handled.
+    whenReady.catch(() => {});
 
     const { memory: wasmMemory, mb } = makeMemory(memoryMB);
     this.memoryMB = mb;
@@ -75,8 +109,26 @@ export class Eka2l1 {
       ...(wasmMemory ? { wasmMemory } : {}),
       arguments: persist ? [] : ['--no-persist'],
       locateFile: (name) => baseUrl + name,
-      print: (line) => (onLog ? onLog(line) : console.log(line)),
-      printErr: (line) => (onLog ? onLog(line) : console.warn(line)),
+      print: (line) => { this.keepLog(line); if (onLog) onLog(line); else console.log(line); },
+      printErr: (line) => {
+        this.keepLog(line);
+        if (onLog) onLog(line); else console.warn(line);
+        // What the loader prints when one of its workers (the emulator's
+        // threads) dies: "worker sent an error! <file>:<line>: <message>".
+        if (!this.broken && String(line).startsWith('worker sent an error!')) {
+          this.broken = { t: performance.now(), message: String(line).replace(/^worker sent an error!\s*\S+:\s*/, '') };
+          for (const listener of this.listeners) listener('broken');
+        }
+      },
+      // The module gave up (out of memory, a failed assertion, abort() in the
+      // emulator's code, on any of its threads). Listeners hear "aborted";
+      // while the emulator is still starting, start() fails with it.
+      onAbort: (what) => {
+        if (this.aborted) return;
+        this.aborted = { t: performance.now(), message: String(what) };
+        failed(new Error(`The emulator stopped: ${this.aborted.message}`));
+        for (const listener of this.listeners) listener('aborted');
+      },
       eka2l1OnResponse: (id, status, type, body) => {
         const waiter = this.pending.get(id);
         if (waiter) {

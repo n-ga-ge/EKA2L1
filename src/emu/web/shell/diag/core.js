@@ -188,7 +188,7 @@ export class Diagnostics {
       const stats = page.emu.stats();
       const sample = {
         t: performance.now(),
-        running: Boolean(page.app) && !page.paused,
+        running: Boolean(page.app) && !page.paused && !page.ended,
         app: page.app ? page.app.uid : null,
         hidden: document.hidden,
         frames: stats.frames,
@@ -261,7 +261,7 @@ export class Diagnostics {
       game: ctx.game,
       session: {
         upS: this.started === null ? null : Math.round((ctx.now - this.started) / 1000),
-        running: Boolean(page.app) && !page.paused,
+        running: Boolean(page.app) && !page.paused && !page.ended,
         paused: Boolean(page.paused),
         emulatorAnswers: this.endpoint === true,
         samples: this.samples.length,

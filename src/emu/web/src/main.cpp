@@ -16,6 +16,7 @@
 // players must not wait behind one either.
 
 #include <web/diag.h>
+#include <web/diag_exits.h>
 #include <web/net.h>
 #include <web/persist.h>
 #include <web/state.h>
@@ -226,7 +227,13 @@ namespace {
         frontend.frames = [] { return state.frames.load(); };
         frontend.can_capture = [] { return state.has_surface.load(); };
         frontend.launch = [](std::uint32_t uid) {
-            return state.control_backend->launch_app(uid, [](kernel::process *) { notify_page("app-exited"); });
+            web::exits_app_launched(uid);
+            return state.control_backend->launch_app(uid, [](kernel::process *process) {
+                // How it ended is kept for GET /v1/web/diag before the page
+                // hears of it, so that the page can ask at once.
+                web::exits_app_ended(process);
+                notify_page("app-exited");
+            });
         };
         frontend.close = [] { state.close_session(); };
         frontend.boot = [](int index) { return state.boot_device(index); };
@@ -389,6 +396,7 @@ int main(int argc, char **argv) {
     setup_control();
     web::net_setup();
     web::diag_setup(state);
+    web::exits_setup(notify_page);
 
     if (state.symsys->get_device_manager()->total() > 0) {
         if (state.stage_two()) {
@@ -419,7 +427,7 @@ int main(int argc, char **argv) {
 
         control::response written;
         if (write_piece(pending.request, written) || web::net_route(pending.request, written)
-            || web::diag_route(pending.request, written)) {
+            || web::diag_route(pending.request, written) || web::exits_route(pending.request, written)) {
             deliver(id, written);
             continue;
         }

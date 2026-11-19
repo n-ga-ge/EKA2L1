@@ -1,9 +1,11 @@
 // Copyright (c) 2026 EKA2L1 Team.
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include <web/diag_exits.h>
 #include <web/state.h>
 
 #include <common/log.h>
 #include <common/thread.h>
+#include <common/webdiag/exits.h>
 #include <common/webdiag/graphics.h>
 #include <drivers/audio/audio.h>
 #include <drivers/graphics/graphics.h>
@@ -13,6 +15,11 @@
 #include <emscripten/html5.h>
 #include <emscripten/threading.h>
 #include <pthread.h>
+
+#include <chrono>
+#include <cstdlib>
+#include <stdexcept>
+#include <thread>
 
 namespace eka2l1::web {
     static void *graphics_thread_entry(void *userdata) {
@@ -105,13 +112,35 @@ namespace eka2l1::web {
         webdiag::guest_thread = true;
 
         while (!state.should_emu_quit) {
+            // Nothing runs the guest after an exception here, so the page
+            // is told: without that it would show a game that stands still.
             try {
+                if (webdiag::exits.debug_stop.load(std::memory_order_relaxed) != 0) {
+                    // A test asked for it (POST /v1/web/diag/stop).
+                    const int how = webdiag::exits.debug_stop.exchange(0);
+                    if (how == 2) {
+                        std::abort();
+                    }
+                    while (how == 3) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                    }
+                    throw std::runtime_error("stopped by POST /v1/web/diag/stop");
+                }
+
                 state.symsys->loop();
             } catch (std::exception &exc) {
                 LOG_ERROR(FRONTEND_CMDLINE, "Main loop exited with exception: {}", exc.what());
                 state.should_emu_quit = true;
+                exits_emulator_stopped(exc.what());
+                break;
+            } catch (...) {
+                LOG_ERROR(FRONTEND_CMDLINE, "Main loop exited with an exception of an unknown kind");
+                state.should_emu_quit = true;
+                exits_emulator_stopped("an exception of an unknown kind");
                 break;
             }
+
+            webdiag::exits.loop_turns.fetch_add(1, std::memory_order_relaxed);
 
             if (state.should_emu_pause) {
                 state.symsys->pause();
