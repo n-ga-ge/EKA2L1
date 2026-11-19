@@ -1738,6 +1738,16 @@ function startFpsReadout() {
   }, 1000);
 }
 
+// Whether the browser lets this page keep files.
+async function storageWorks() {
+  try {
+    await navigator.storage.getDirectory();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function loadSiteConfig() {
   try {
     const response = await fetch('config.json', { cache: 'no-store' });
@@ -1764,8 +1774,8 @@ async function main() {
 
   // Start fetching what the address names before anything else: the
   // downloads then run while the emulator is compiled and started.
-  const persist = params.get('persist') !== '0';
-  page.downloads = Downloads.open({ persist, limitMB: params.has('cache') ? Number(params.get('cache')) : null });
+  const wantPersist = params.get('persist') !== '0';
+  page.downloads = Downloads.open({ persist: wantPersist, limitMB: params.has('cache') ? Number(params.get('cache')) : null });
   const wanted = wantedFromParams(params);
   const early = wanted ? startLoad(wanted) : null;
 
@@ -1795,6 +1805,12 @@ async function main() {
   const emu = new Eka2l1();
   page.emu = emu;
   window.eka2l1 = emu;
+
+  // A browser can have the storage the saves are kept in and refuse to use
+  // it (a private window in Firefox). The emulator would stop while starting
+  // there, so it is started without saving, and the diagnostics say why
+  // (diag/memory.js: "saves-not-kept").
+  const persist = wantPersist && await storageWorks();
 
   showStep('Starting emulator…');
   try {
