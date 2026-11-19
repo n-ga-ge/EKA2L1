@@ -56,6 +56,24 @@ export class Input {
       for (const input of inputs) this.gamepad.push({ input, key });
     }
     this.padHeld = new Map();
+    this.lockKeyboard();
+  }
+
+  // In fullscreen the browser keeps some keys for itself: Escape leaves
+  // fullscreen, and others are its shortcuts. Where the Keyboard Lock API
+  // exists (Chromium) the keys bound to the game are claimed from it, so they
+  // reach the game; leaving fullscreen then takes a long press of Escape, or
+  // the menu. Elsewhere (Firefox, Safari) Escape still leaves fullscreen. Call
+  // again whenever the bindings or the fullscreen state change: each lock
+  // replaces the one before.
+  lockKeyboard() {
+    const keyboard = navigator.keyboard;
+    if (!keyboard || typeof keyboard.lock !== 'function') return;
+    if (document.fullscreenElement && this.keyboard.size) {
+      keyboard.lock([...this.keyboard.keys()]).catch(() => { /* not allowed here, e.g. in a frame */ });
+    } else {
+      keyboard.unlock();
+    }
   }
 
   press(source, key) {
@@ -139,6 +157,7 @@ export class Input {
 
     target.addEventListener('keydown', onKey(true), true);
     target.addEventListener('keyup', onKey(false), true);
+    document.addEventListener('fullscreenchange', () => this.lockKeyboard());
     // Keys released while the page is not focused never produce a keyup.
     window.addEventListener('blur', () => {
       for (const [code, keys] of this.keyboard) {

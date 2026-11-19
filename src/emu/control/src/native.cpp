@@ -9,18 +9,22 @@
 #include <common/language.h>
 #include <common/log.h>
 #include <common/path.h>
+#include <common/time.h>
 #include <config/config.h>
 #include <control/native.h>
 #include <control/ngage.h>
 #include <drivers/audio/audio.h>
 #include <drivers/graphics/graphics.h>
 #include <drivers/input/common.h>
+#include <enhance/enhance.h>
 #include <filesystem>
 #include <kernel/kernel.h>
+#include <kernel/timing.h>
 #include <kernel/process.h>
 #include <kernel/thread.h>
 #include <mutex>
 #include <package/manager.h>
+#include <package/ngage2.h>
 #include <services/applist/applist.h>
 #include <services/window/screen.h>
 #include <services/window/window.h>
@@ -45,10 +49,43 @@ namespace eka2l1::control {
         const int w = std::max(1, int(std::round(width * scale))), h = std::max(1, int(std::round(height * scale)));
         require(std::uint64_t(w) * h <= 64 * 1024 * 1024, "too_large", "image exceeds 64 megapixels", 413);
         std::string raw((std::size_t(w) * 4 + 1) * h, 0);
+        // Each output pixel is the average of the source pixels whose centres
+        // fall inside it, or, when the picture is enlarged, the one under its
+        // own centre. The screen texture is drawn at the scale the frontend
+        // shows it at, often a fraction: at 3.4 each guest pixel is a block of
+        // three or four texels, so averaging the block gives that pixel back
+        // exactly, and text the window server drew at the full scale comes out
+        // smoothed rather than with strokes missing. Taking one texel at the
+        // block's edge, as before, landed on the previous block for one row
+        // and column in three or four, and small text lost whole rows of
+        // pixels in every screenshot.
+        auto spans = [](int out_size, int in_size, double ratio) {
+            std::vector<std::pair<int, int>> result(out_size);
+            for (int i = 0; i < out_size; ++i) {
+                int first = std::max(0, int(std::ceil(i * ratio - 0.5)));
+                int end = std::min(in_size, int(std::ceil((i + 1) * ratio - 0.5)));
+                if (end <= first) {
+                    first = std::min(in_size - 1, int((i + 0.5) * ratio));
+                    end = first + 1;
+                }
+                result[i] = { first, end };
+            }
+            return result;
+        };
+        // The texture holds the whole screen, cut to whole texels, so its size
+        // over the picture's is the scale a full-screen draw was made at.
+        const auto rows = spans(h, height, double(height) / h), cols = spans(w, width, double(width) / w);
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
-                const auto src = (std::size_t(std::min(height - 1, int(y / scale))) * width + std::min(width - 1, int(x / scale))) * 4;
-                std::copy_n(pixels.data() + src, 4, raw.data() + std::size_t(y) * (w * 4 + 1) + 1 + x * 4);
+                std::uint32_t sum[4] = {};
+                for (int sy = rows[y].first; sy < rows[y].second; ++sy)
+                    for (int sx = cols[x].first; sx < cols[x].second; ++sx)
+                        for (int c = 0; c < 4; ++c)
+                            sum[c] += pixels[(std::size_t(sy) * width + sx) * 4 + c];
+                const std::uint32_t count = std::uint32_t(rows[y].second - rows[y].first) * (cols[x].second - cols[x].first);
+                char *dest = raw.data() + std::size_t(y) * (w * 4 + 1) + 1 + x * 4;
+                for (int c = 0; c < 4; ++c)
+                    dest[c] = char((sum[c] + count / 2) / count);
             }
         auto put32 = [](std::string &out, std::uint32_t n) { for (int shift : {24,16,8,0}) out += char(n >> shift); };
         std::string out("\x89PNG\r\n\x1a\n", 8);
@@ -303,6 +340,8 @@ namespace eka2l1::control {
             }
             if (req.method == "RESOLVE" && p == std::vector<std::string>{ "v1", "log" })
                 return response::from_json({ { "hostPath", frontend.log } });
+            if (response enhanced; enhance::handle_request(frontend.get_system(), req, enhanced))
+                return enhanced;
             auto body = req.data();
             if ((p == std::vector<std::string>{ "v1", "ngage2", "games" } && req.method == "GET")
                 || (p.size() == 5 && p[1] == "ngage2" && p[2] == "games" && p[4] == "launch" && req.method == "POST")) {
@@ -366,6 +405,7 @@ namespace eka2l1::control {
             if (p == std::vector<std::string>{ "v1", "apps" } && req.method == "POST") {
                 auto before = app_list(true);
                 json::array results;
+                std::vector<std::string> direct_apps;
                 auto paths = body.contains("paths") ? body["paths"] : json(json::array{ required_string(body, "path") });
                 require(paths.is_array(), "bad_request", "paths must be an array", 400);
                 for (auto &value : paths.items()) {
@@ -375,6 +415,7 @@ namespace eka2l1::control {
                     auto type = body["type"].string(ext == ".sis" || ext == ".sisx" ? "sis" : ext == ".n-gage" ? "ngage2"
                                                                                                                : "ngage");
                     bool ok = false;
+                    json entry = { { "path", path }, { "type", type } };
                     if (type == "sis")
                         frontend.run_blocking([&] { ok = sys().install_package(common::utf8_to_ucs2(path), sys().get_default_install_drive()) == package::installation_result_success; });
                     else if (type == "ngage")
@@ -384,10 +425,35 @@ namespace eka2l1::control {
                         fs::create_directories(dir);
                         fs::copy_file(fs::u8path(path), dir / fs::u8path(path).filename(), fs::copy_options::overwrite_existing);
                         ok = true;
+                    } else if (type == "ngage2-direct") {
+                        // The game's own SIS part, and a registration of its app, without
+                        // the N-Gage application and its certificate check.
+                        auto *io = sys().get_io_system();
+                        const drive_number drive = io->get_drive_entry(drive_e) ? drive_e : sys().get_default_install_drive();
+                        // The parts are copied out of the file for a moment: to the temporary
+                        // folder (memory on web, never kept), or the emulator's cache without one.
+                        std::error_code no_temp;
+                        auto scratch = fs::temp_directory_path(no_temp);
+                        if (no_temp || !fs::is_directory(scratch, no_temp))
+                            scratch = fs::u8path(add_path(sys().get_config()->storage, "cache/"));
+                        package::ngage2::install_result installed;
+                        frontend.run_blocking([&] { installed = package::ngage2::install_game(*sys().get_packages(), io, path, drive, scratch.string()); });
+                        require(installed.error.empty(), "install_failed", installed.error);
+                        json::array registered;
+                        for (const auto &app : installed.apps) {
+                            registered.push_back({ { "uid", hex(app.uid) }, { "name", common::ucs2_to_utf8(app.caption) }, { "executable", common::ucs2_to_utf8(app.executable) } });
+                            direct_apps.push_back(hex(app.uid));
+                        }
+                        entry["package"] = hex(installed.package_uid);
+                        entry["title"] = common::ucs2_to_utf8(installed.title);
+                        entry["description"] = common::ucs2_to_utf8(installed.description);
+                        entry["apps"] = registered;
+                        ok = true;
                     } else
                         throw api_error(400, "bad_request", "unknown install type");
                     require(ok, "install_failed", "app installation failed");
-                    results.push_back({ { "path", path }, { "type", type }, { "ok", ok } });
+                    entry["ok"] = ok;
+                    results.push_back(entry);
                 }
                 apps()->rescan_registries(sys().get_io_system());
                 frontend.changed(native_change::applications);
@@ -398,7 +464,8 @@ namespace eka2l1::control {
                     for (const auto &old : before.items())
                         if (old["uid"].string() == app["uid"].string())
                             exists = true;
-                    if (!exists)
+                    // A game installed again keeps its UID, but this install registered it.
+                    if (!exists || std::find(direct_apps.begin(), direct_apps.end(), app["uid"].string()) != direct_apps.end())
                         added.push_back(app);
                 }
                 return response::from_json({ { "results", results }, { "added", added } });
@@ -531,6 +598,12 @@ namespace eka2l1::control {
                 auto size = scr->current_mode().size * scr->display_scale_factor;
                 std::vector<std::uint8_t> pixels(std::size_t(size.x) * size.y * 4);
                 require(drivers::read_bitmap(sys().get_graphics_driver(), scr->screen_texture, point(0, 0), size, 32, pixels.data()), "capture_failed", "screen readback failed");
+                // A phone's screen is opaque, and so is every host's view of it. The screen
+                // texture's alpha is whatever the last drawing left: a GLES surface copied
+                // into it brings its own, often 0, which made the 3D of N-Gage 2.0 games
+                // transparent (white in most viewers) in the PNG.
+                for (std::size_t i = 3; i < pixels.size(); i += 4)
+                    pixels[i] = 0xFF;
                 double scale = 1;
                 try {
                     scale = std::stod(req.param("scale", "1"));
@@ -540,6 +613,23 @@ namespace eka2l1::control {
                 auto res = png(pixels, size.x, size.y, scale / scr->display_scale_factor);
                 res.headers["X-Frame-Count"] = std::to_string(frontend.frames());
                 return res;
+            }
+            if (p == std::vector<std::string>{ "v1", "clock" }) {
+                // The guest's clock. It starts at the host's time; PUT moves it, and it runs on from
+                // there until the kernel is created again. Software whose certificates expired long
+                // ago (N-Gage 2.0) checks them against this clock.
+                auto *kern = sys().get_kernel_system();
+                require(kern != nullptr, "no_device", "no device is booted", 409);
+                if (req.method == "PUT") {
+                    const double unix_ms = required_number(body, "unixMs");
+                    require(unix_ms >= 0 && unix_ms < 253402300800000.0, "bad_request", "unixMs out of range", 400);
+                    const std::uint64_t target = static_cast<std::uint64_t>(unix_ms) * 1000 + common::ad_epoc_dist_microsecs;
+                    kernel_lock guard(kern);
+                    kern->set_base_time(target - kern->get_ntimer()->microseconds());
+                } else
+                    require(req.method == "GET", "not_found", "unknown operation", 404);
+                const std::uint64_t now = kern->universal_time();
+                return response::from_json({ { "unixMs", double((now - common::ad_epoc_dist_microsecs) / 1000) }, { "utcOffset", kern->utc_offset() } });
             }
             if (p == std::vector<std::string>{ "v1", "language" }) {
                 if (req.method == "PUT") {

@@ -7,6 +7,23 @@
 import { frameRates } from './core.js';
 import { number, rows, seconds } from './dom.js';
 
+// The running game's enhancement profile (app.js keeps it in page.enhance):
+// whether the emulator holds it, whether it matches this copy of the game, and
+// the scale the 3D is drawn at.
+function enhanceState(enhance) {
+  if (!enhance) return null;
+  const answer = enhance.answer;
+  const match = answer ? (answer.active ? 'matches the game' : 'does not match this copy of the game') : '';
+  if (enhance.state === 'loading') return { value: 'loading the profile', note: `Profile ${enhance.engine}.` };
+  if (enhance.state === 'failed') return { value: 'profile not loaded', note: `Profile ${enhance.engine}.` };
+  if (enhance.state === 'missing') return { value: 'not available in this emulator', note: `Profile ${enhance.engine}${match ? ', ' + match : ''}.` };
+  const scale = answer && answer.scale;
+  return {
+    value: !scale ? 'off' : `drawn at ${typeof scale === 'number' ? `${Number(scale.toFixed(2))}×` : scale}${answer.flat ? `, menus and text ${answer.flat === 'scaler' ? 'through the pixel-art scaler' : answer.flat}` : ''}`,
+    note: `Profile ${enhance.engine}${match ? ', ' + match : ''}${answer && answer.layerFailed ? '; the layer failed, the game draws its own 3D' : ''}.`,
+  };
+}
+
 export default {
   id: 'session',
   title: 'Session',
@@ -31,6 +48,7 @@ export default {
       measuredS: stretch ? stretch.seconds : 0,
       gamepads: ctx.page.gamepads || 0,
       canvas: surface ? { width: surface.width, height: surface.height, filter: surface.filter, fill: surface.fill } : null,
+      enhance: enhanceState(ctx.page.enhance),
     };
   },
 
@@ -51,6 +69,7 @@ export default {
       },
       { label: 'Emulator up', value: seconds(data.upS * 1000), note: `${Math.round(data.frames)} frames drawn` },
       data.canvas && { label: 'Picture', value: `${data.canvas.width}×${data.canvas.height}, ${data.canvas.filter}` },
+      data.enhance && { label: '3D resolution', value: data.enhance.value, note: data.enhance.note },
       { label: 'Gamepads', value: String(data.gamepads) },
     ])];
   },
