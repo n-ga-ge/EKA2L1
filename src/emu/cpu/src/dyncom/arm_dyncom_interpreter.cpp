@@ -290,6 +290,30 @@ static constexpr unsigned int B_COND_THUMB_IDX = 198;
 static constexpr unsigned int CMP_BBL_IDX = 206;
 static constexpr unsigned int CMP_B_COND_THUMB_IDX = 207;
 
+// Synthetic instruction emitted in front of a hooked address (ARMul_State::
+// hook_addrs). It calls the core's hook handler and then falls through to the
+// real instruction, unless the handler moved PC.
+static constexpr unsigned int HOOK_IDX = 208;
+
+struct hook_inst {
+    std::uint32_t addr;
+};
+
+static bool emit_hook_if_wanted(ARMul_State *cpu, const std::uint32_t addr) {
+    if (cpu->hook_addrs.empty() || !std::binary_search(cpu->hook_addrs.begin(), cpu->hook_addrs.end(), addr & ~1U)) {
+        return false;
+    }
+
+    const std::size_t alloc_size = sizeof(arm_inst) + sizeof(hook_inst);
+    arm_inst *base = reinterpret_cast<arm_inst *>(&cpu->trans_cache_buf[cpu->trans_cache_buf_top]);
+    cpu->trans_cache_buf_top += ((alloc_size + 7) >> 3) << 3;
+    base->idx = HOOK_IDX;
+    base->cond = ConditionCode::AL;
+    base->br = TransExtData::NON_BRANCH;
+    reinterpret_cast<hook_inst *>(base->component)->addr = addr;
+    return true;
+}
+
 enum accel_chain_op : std::uint8_t {
     ACC_SHL,
     ACC_SHR,
@@ -1902,6 +1926,12 @@ static int InterpreterTranslateBlock(ARMul_State *cpu, std::size_t &bb_start, st
 
     ARM_INST_PTR prev_base = nullptr;
     while (ret == TransExtData::NON_BRANCH) {
+        if (emit_hook_if_wanted(cpu, phys_addr)) {
+            // The fused compare-and-branch expects the branch right behind the
+            // compare; a hook in between must keep them apart.
+            prev_base = nullptr;
+        }
+
         unsigned int inst_size = InterpreterTranslateInstruction(cpu, phys_addr, inst_base);
 
         if (!inst_base) {
@@ -1939,6 +1969,7 @@ static int InterpreterTranslateSingle(ARMul_State *cpu, std::size_t &bb_start, s
     std::uint32_t phys_addr = addr;
     std::uint32_t pc_start = cpu->Reg[15];
 
+    emit_hook_if_wanted(cpu, phys_addr);
     InterpreterTranslateInstruction(cpu, phys_addr, inst_base);
 
     if (!inst_base) {
@@ -2446,6 +2477,8 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
         goto CMP_BBL_INST;                     \
     case 207:                                  \
         goto CMP_B_COND_THUMB_INST;            \
+    case 208:                                  \
+        goto HOOK_INST;                        \
     }
 #endif
 
@@ -2675,10 +2708,12 @@ unsigned InterpreterMainLoop(ARMul_State *cpu, std::uint32_t &num_instrs) {
         &&END,
         &&LOOP_ACCEL_INST,
         &&CMP_BBL_INST,
-        &&CMP_B_COND_THUMB_INST };
+        &&CMP_B_COND_THUMB_INST,
+        &&HOOK_INST };
     assert(InstLabel[CMP_IDX] == &&CMP_INST && InstLabel[BBL_IDX] == &&BBL_INST
         && InstLabel[B_COND_THUMB_IDX] == &&B_COND_THUMB && InstLabel[CMP_BBL_IDX] == &&CMP_BBL_INST
-        && InstLabel[CMP_B_COND_THUMB_IDX] == &&CMP_B_COND_THUMB_INST);
+        && InstLabel[CMP_B_COND_THUMB_IDX] == &&CMP_B_COND_THUMB_INST
+        && InstLabel[HOOK_IDX] == &&HOOK_INST);
 #endif
     arm_inst *inst_base;
     unsigned int addr;
@@ -2790,6 +2825,27 @@ LOOP_ACCEL_INST : {
     }
     INC_PC(sizeof(loop_accel_inst));
     FETCH_INST;
+    GOTO_NEXT_INST;
+}
+HOOK_INST : {
+    const std::uint32_t pc = cpu->Reg[15];
+
+    SAVE_NZCVT;
+    cpu->RaiseHook(pc);
+    LOAD_NZCVT;
+
+    // The handler may have stopped the core or moved PC (to skip a function,
+    // for instance); then the hooked instruction must not run.
+    if (cpu->NumInstrsToExecute == 0) {
+        goto END;
+    }
+
+    if (cpu->Reg[15] != pc) {
+        goto DISPATCH;
+    }
+
+    INC_PC(sizeof(hook_inst));
+    inst_base = (arm_inst *)&cpu->trans_cache_buf[ptr];
     GOTO_NEXT_INST;
 }
 ADC_INST : {

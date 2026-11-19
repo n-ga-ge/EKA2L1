@@ -18,6 +18,29 @@ export const KEYS = {
 // How much of a file goes to the emulator in one request.
 const PIECE_BYTES = 4 * 1024 * 1024;
 
+// The module's memory, made here so the page picks its ceiling (the build links
+// with IMPORTED_MEMORY). INITIAL is the build's INITIAL_MEMORY. 1 GB is the
+// default because some mobile browsers reserve a shared memory's whole maximum
+// up front and refuse larger ones; an N-Gage 2.0 phone needs up to 2 GB, the
+// most the module accepts.
+const WASM_PAGE = 64 * 1024;
+const INITIAL_MEMORY = 160 * 1024 * 1024;
+const DEFAULT_MEMORY_MB = 1024;
+const MAX_MEMORY_MB = 2048;
+
+function makeMemory(megabytes) {
+  const wanted = Math.min(Math.max(megabytes || DEFAULT_MEMORY_MB, DEFAULT_MEMORY_MB), MAX_MEMORY_MB);
+  for (const mb of wanted > DEFAULT_MEMORY_MB ? [wanted, DEFAULT_MEMORY_MB] : [wanted]) {
+    try {
+      const memory = new WebAssembly.Memory({ initial: INITIAL_MEMORY / WASM_PAGE, maximum: mb * 1024 * 1024 / WASM_PAGE, shared: true });
+      return { memory, mb };
+    } catch (error) {
+      console.warn(`a ${mb} MB memory was refused:`, error);
+    }
+  }
+  return { memory: undefined, mb: 0 }; // the module makes its own, of the build's maximum
+}
+
 // Where this module was loaded from. The wasm, its data file and the audio
 // worklet sit beside it, which need not be where the page is: a site can keep
 // each build of the player in a folder of its own, so that a browser never
@@ -39,12 +62,17 @@ export class Eka2l1 {
 
   // Loads the wasm module and resolves once the emulator core is up.
   // `persist: false` keeps everything in memory (nothing survives a reload).
-  async start({ canvas, baseUrl = HERE, onLog = null, persist = true } = {}) {
+  // memoryMB: the heap's ceiling, 1024 (the default) to 2048. A browser that
+  // refuses a larger one gets 1024; `memoryMB` on the instance says what it got.
+  async start({ canvas, baseUrl = HERE, onLog = null, persist = true, memoryMB = DEFAULT_MEMORY_MB } = {}) {
     let ready;
     const whenReady = new Promise((resolve) => { ready = resolve; });
 
+    const { memory: wasmMemory, mb } = makeMemory(memoryMB);
+    this.memoryMB = mb;
     this.module = await createEka2l1({
       canvas,
+      ...(wasmMemory ? { wasmMemory } : {}),
       arguments: persist ? [] : ['--no-persist'],
       locateFile: (name) => baseUrl + name,
       print: (line) => (onLog ? onLog(line) : console.log(line)),
