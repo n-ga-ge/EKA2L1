@@ -596,6 +596,22 @@ namespace eka2l1::dispatch {
         return epoc::error_none;
     }
 
+    BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_open_des, const std::uint32_t handle, epoc::desc8 *content) {
+        dispatch::dispatcher *dispatcher = sys->get_dispatcher();
+        dispatch::epoc_video_player *player = dispatcher->video_player_container_.get_object(handle);
+
+        if (!player) {
+            return epoc::error_bad_handle;
+        }
+
+        // No video backend opens a clip from memory yet (custom IO). Not supported is one of the
+        // two results the guest's OpenDesL reports through MvpuoOpenComplete rather than leaving
+        // with, so a game carries on without the clip.
+        LOG_WARN(HLE_DISPATCHER, "Opening a video from a descriptor ({} bytes) is not supported",
+            content ? content->get_length() : 0);
+        return epoc::error_not_supported;
+    }
+
     BRIDGE_FUNC_DISPATCHER(std::int32_t, evideo_player_play, const std::uint32_t handle, const std::uint64_t *range) {
         dispatch::dispatcher *dispatcher = sys->get_dispatcher();
         dispatch::epoc_video_player *player = dispatcher->video_player_container_.get_object(handle);
