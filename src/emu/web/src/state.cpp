@@ -105,11 +105,48 @@ namespace eka2l1::web {
                 width = static_cast<float>(size.x) * height / static_cast<float>(size.y);
             }
 
+            // The page rounds the canvas to whole pixels, so one side of the
+            // fitted picture can come out a fraction of a pixel short of the
+            // canvas. The picture then takes the whole canvas: cut down to a
+            // whole number it left a row or column of the canvas undrawn.
+            if (static_cast<float>(swapchain_size.x) - width < 1.0f) {
+                width = static_cast<float>(swapchain_size.x);
+            }
+
+            if (static_cast<float>(swapchain_size.y) - height < 1.0f) {
+                height = static_cast<float>(swapchain_size.y);
+            }
+
             const int x = static_cast<int>((swapchain_size.x - width) / 2);
             const int y = static_cast<int>((swapchain_size.y - height) / 2);
 
-            scr->set_native_scale_factor(symsys->get_graphics_driver(), width / static_cast<float>(size.x),
-                height / static_cast<float>(size.y));
+            const float scale_x = width / static_cast<float>(size.x);
+            const float scale_y = height / static_cast<float>(size.y);
+
+            if (use_upscale_shader) {
+                // A scaling shader chosen on the page does all of the
+                // enlarging, so the screen stays at the guest's own size.
+                // Otherwise the window server keeps the screen at the size of
+                // the canvas (see below) and a shader is handed a picture that
+                // is enlarged already: it then runs at a scale of one, where
+                // the pixel-art scalers find nothing to do. The factors still
+                // say where a pointer position on the canvas is on the screen.
+                scr->logic_scale_factor_x = scale_x;
+                scr->logic_scale_factor_y = scale_y;
+                // The 3D of an enhanced game is the exception: the GPU layer
+                // draws it at its own scale, and the shader enlarges that.
+                float own = 1.0f;
+                if (epoc::screen_compositor *const composing = scr->compositor.load()) {
+                    own = composing->screen_scale(scr, own);
+                }
+                scr->try_change_display_rescale(symsys->get_graphics_driver(), own);
+            } else {
+                // The window server draws the screen at the size it is shown
+                // at: text and shapes at full detail, the bitmaps a game draws
+                // enlarged with the texture filter. A game that writes to the
+                // screen directly locks the factor to one by itself.
+                scr->set_native_scale_factor(symsys->get_graphics_driver(), scale_x, scale_y);
+            }
 
             scr->absolute_pos.x = x;
             scr->absolute_pos.y = y;
@@ -135,6 +172,12 @@ namespace eka2l1::web {
 
             builder.set_texture_filter(scr->screen_texture, true, filter);
             builder.set_texture_filter(scr->screen_texture, false, filter);
+            // A texture repeats unless told otherwise. Enlarged with linear
+            // filtering, or read by a shader that looks at the neighbours of
+            // a pixel, the screen would then have the opposite edge blended
+            // into its outermost rows and columns.
+            builder.set_texture_addressing_mode(scr->screen_texture, drivers::addressing_direction::s, drivers::addressing_option::clamp_to_edge);
+            builder.set_texture_addressing_mode(scr->screen_texture, drivers::addressing_direction::t, drivers::addressing_option::clamp_to_edge);
             builder.draw_bitmap(scr->screen_texture, 0, dest, src, eka2l1::vec2(0, 0),
                 static_cast<float>(scr->ui_rotation), flags);
         }
