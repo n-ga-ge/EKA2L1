@@ -43,6 +43,8 @@
 #endif
 
 #if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/graphics.h>
+
 #include <emscripten.h>
 #include <emscripten/html5.h>
 
@@ -1923,6 +1925,11 @@ namespace eka2l1::drivers {
 
             return;
         }
+
+#if EKA2L1_PLATFORM(WEB)
+        const webdiag::timed waited(webdiag::graphics.submit_wait_us, webdiag::guest_thread);
+#endif
+
         list_queue.push(list);
     }
 
@@ -2170,12 +2177,18 @@ namespace eka2l1::drivers {
 
             web_last_animation_frame = std::chrono::steady_clock::now();
             static_cast<ogl_graphics_driver *>(self)->run_until_present();
+
+            webdiag::graphics.note_call(false, static_cast<ogl_graphics_driver *>(self)->presented_);
         };
 
         web_last_animation_frame = std::chrono::steady_clock::now();
         web_last_frame_request = web_last_animation_frame;
 
         web_frame_timer = emscripten_set_interval([](void *self) {
+            if (const EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context = emscripten_webgl_get_current_context()) {
+                webdiag::graphics.note_context(emscripten_is_webgl_context_lost(context));
+            }
+
             if (web_debug_animation_frames.load(std::memory_order_relaxed) == 2) {
                 return;
             }
@@ -2193,6 +2206,8 @@ namespace eka2l1::drivers {
             }
 
             static_cast<ogl_graphics_driver *>(self)->run_until_present();
+
+            webdiag::graphics.note_call(true, static_cast<ogl_graphics_driver *>(self)->presented_);
         }, TIMER_INTERVAL_MS, this);
 
         emscripten_set_main_loop_arg(animation_frame, this, 0, true);

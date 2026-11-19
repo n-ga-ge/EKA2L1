@@ -188,7 +188,7 @@ export class Diagnostics {
       const stats = page.emu.stats();
       const sample = {
         t: performance.now(),
-        running: Boolean(page.app) && !page.paused,
+        running: Boolean(page.app) && !page.paused && !page.ended,
         app: page.app ? page.app.uid : null,
         hidden: document.hidden,
         frames: stats.frames,
@@ -261,7 +261,7 @@ export class Diagnostics {
       game: ctx.game,
       session: {
         upS: this.started === null ? null : Math.round((ctx.now - this.started) / 1000),
-        running: Boolean(page.app) && !page.paused,
+        running: Boolean(page.app) && !page.paused && !page.ended,
         paused: Boolean(page.paused),
         emulatorAnswers: this.endpoint === true,
         samples: this.samples.length,
@@ -298,13 +298,17 @@ export class Diagnostics {
   wire() {
     const { dialog, copy, download } = this.ui;
     dialog.addEventListener('close', () => {
+      // The event arrives after the fact: a dialog closed and opened again at
+      // once is open by now, and its timer must stay.
+      if (dialog.open) return;
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     });
     copy.addEventListener('click', async () => {
       try {
-        await navigator.clipboard.writeText(this.tools.formatText(await this.report()));
-        this.note('Report copied.');
+        const report = await this.report();
+        await navigator.clipboard.writeText(this.tools.formatText(report));
+        this.note(report.redacted && report.redacted.failed ? 'Copied, but the report could only be made in part.' : 'Report copied.');
       } catch (error) {
         console.warn(error);
         this.note('The browser did not allow copying. Use "Download report".');
@@ -374,7 +378,12 @@ export class Diagnostics {
         console.warn(`diagnostics: ${entry.id}.render failed`, error);
         nodes = [el('p', { class: 'hint' }, 'This part could not be shown.')];
       }
-      part.content.replaceChildren(...[nodes].flat().filter(Boolean));
+      // A section that gives the very nodes that are there keeps them in
+      // place, so that a button of its own is not taken out from under a
+      // click or the keyboard every second.
+      const next = [nodes].flat().filter(Boolean);
+      const there = part.content.childNodes;
+      if (next.length !== there.length || next.some((node, index) => node !== there[index])) part.content.replaceChildren(...next);
     }
     for (const [id, part] of this.parts.sections) {
       if (!shown.has(id)) part.node.remove();

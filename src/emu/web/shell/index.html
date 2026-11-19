@@ -34,6 +34,8 @@
       <canvas id="backdrop" width="44" height="52" aria-hidden="true"></canvas>
       <canvas id="canvas" width="528" height="624" tabindex="0"></canvas>
       <div id="overlay" hidden></div>
+      <!-- The performance overlay (diag/hud.js). Before the loader, which covers it. -->
+      <div id="hud" aria-hidden="true" hidden></div>
 
       <form id="setup" hidden>
         <h2 id="setup-title">Load a game</h2>
@@ -81,6 +83,7 @@
       <button type="button" id="m-link" disabled>Copy link to this game</button>
       <button type="button" id="m-guide">Guide</button>
       <button type="button" id="m-info">Diagnostics</button>
+      <button type="button" id="m-hud" aria-pressed="false">Show performance overlay</button>
       <a id="m-home" hidden>All games</a>
       <a id="m-docs" target="_blank" rel="noopener" hidden>Documentation</a>
     </div>

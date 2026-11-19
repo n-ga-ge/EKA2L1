@@ -29,6 +29,10 @@
 #include <common/log.h>
 #include <common/path.h>
 #include <common/platform.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/speed.h>
+#endif
 #include <common/random.h>
 
 #include <disasm/disasm.h>
@@ -723,6 +727,9 @@ namespace eka2l1 {
 
     bool system_impl::pause() {
         paused = true;
+#if EKA2L1_PLATFORM(WEB)
+        webdiag::speed.paused.begin();
+#endif
 
         if (kern_)
             kern_->stop_cores_idling();
@@ -737,6 +744,9 @@ namespace eka2l1 {
 
     bool system_impl::unpause() {
         paused = false;
+#if EKA2L1_PLATFORM(WEB)
+        webdiag::speed.paused.end();
+#endif
 
         const std::lock_guard<std::mutex> guard(mut);
 
@@ -805,6 +815,9 @@ namespace eka2l1 {
             }
 
             to_run->add_ticks(cpu->get_num_instruction_executed());
+#if EKA2L1_PLATFORM(WEB)
+            webdiag::speed.ran(cpu->get_num_instruction_executed());
+#endif
         }
 
         if (!kern_->should_terminate()) {

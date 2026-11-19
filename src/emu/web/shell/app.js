@@ -30,7 +30,7 @@
 //   ?fps=1        show frames per second in the status line
 //   ?memory=<MB>  the heap's ceiling, 1024 (default) to 2048; an N-Gage 2.0
 //                 game gets 2048 without asking, which its phone needs
-//   ?diag=1       show the performance overlay (see diag/hud.js)
+//   ?diag=1|0     show or hide the performance overlay (see diag/hud.js)
 //   ?room=<code>  join that multiplayer room once the game is running (see
 //                 net.js); an invite link is the game's link with this added
 //
@@ -39,6 +39,7 @@
 
 import { Backdrop } from './backdrop.js';
 import { Diagnostics } from './diag/core.js';
+import { endedStatus } from './diag/errors.js';
 import { helpLink } from './diag/help.js';
 import { setupHud } from './diag/hud.js';
 import { formatText, redact } from './diag/report.js';
@@ -71,6 +72,7 @@ const page = {
   site: null, // config.json, when the host provides one
   downloads: null, // promise of the download cache (loader.js)
   app: null, // { uid, name } of the running game
+  ended: null, // set once that game has closed or crashed by itself, or the emulator has stopped (onEmulatorEvent)
   source: null, // { fw, game } URLs the running game came from, { device, app, game }, or { slug }
   // What this session runs: 'ngage' (the original N-Gage) or 'ngage2' (an
   // N-Gage 2.0 phone), decided before the emulator starts.
@@ -190,7 +192,10 @@ async function removeCard() {
 
 async function launch(app) {
   setStatus(`Starting ${app.name}…`);
+  if (!(page.ended && page.ended.stopped)) page.ended = null;
+  page.launched = Date.now();
   await page.emu.call('POST', `/v1/apps/${app.uid}/launch`);
+  performance.mark('eka2l1:launched'); // read back by the diagnostics, as the mark in wireSetup
   page.app = app;
   launches += 1;
   page.paused = false;
@@ -204,6 +209,8 @@ async function launch(app) {
   applyBindings();
   applyDisplay();
   setStatus(app.name);
+  // It can have ended already, before the launch request was answered.
+  if (page.ended) showEnded();
   refreshControls();
   // After a restart in a multiplayer room: the link comes up again.
   if (page.net) page.net.release();
@@ -266,6 +273,7 @@ async function preparePhone(load) {
       showStep('Installing the N-Gage application…');
       await installFile(phone.app, 'ngage.sis', (path) => page.emu.call('POST', '/v1/apps', { path, type: 'sis' }));
       page.phone.app = true;
+      performance.mark('eka2l1:app-installed');
     }
   }
   load.installed('app');
@@ -285,7 +293,7 @@ async function installPhoneGame(source, expected) {
   const uid = expected && expected.uid ? String(expected.uid).toLowerCase() : null;
   const app = (installed.added || []).find((item) => String(item.uid).toLowerCase() === uid) || (installed.added || [])[0];
   if (!app) throw new Error('No game was found in the N-Gage 2.0 file');
-  performance.mark('eka2l1:game-installed');
+  performance.mark('eka2l1:game-installed', { detail: { frames: page.emu.frames() } }); // the count before the game draws, for diag/startup.js
   progress.load = null; // from here the status line belongs to the game
   await launch(app);
 }
@@ -318,7 +326,7 @@ async function installAndLaunch(source, name, expected = null) {
   const app = apps.find((item) => String(item.uid).toLowerCase() === uid) || apps[0];
   if (!app) throw new Error('No game was found on the card dump');
 
-  performance.mark('eka2l1:game-installed');
+  performance.mark('eka2l1:game-installed', { detail: { frames: page.emu.frames() } }); // the count before the game draws, for diag/startup.js
   progress.load = null; // from here the status line belongs to the game
   await launch(app);
 }
@@ -420,6 +428,7 @@ async function showSetup() {
 function wireSetup() {
   const run = (work) => async () => {
     setup.hidden = true;
+    performance.mark('eka2l1:load-begin'); // where the diagnostics count the wait from (diag/startup.js)
     try {
       await work();
       canvas.focus();
@@ -437,7 +446,7 @@ function wireSetup() {
     const link = shareLink();
     if (link) {
       const next = new URL(link);
-      for (const key of ['log', 'persist', 'touch', 'fps', 'room']) {
+      for (const key of ['log', 'persist', 'touch', 'fps', 'diag', 'room']) {
         if (params.has(key)) next.searchParams.set(key, params.get(key));
       }
       history.replaceState(null, '', next);
@@ -1537,8 +1546,50 @@ async function setPaused(paused, byUser) {
   refreshControls();
 }
 
+// The game closed or crashed by itself, or the emulator stopped. The picture
+// just stands still then, so the status line says what happened and how to
+// go on. How the game ended is in the emulator's diagnostics (diag/errors.js).
+// page.ended is { end } (the emulator's record of the ending, or null when it
+// has none) or { stopped: true }, until the next launch.
+function showEnded() {
+  if (page.ended.stopped) {
+    setStatus('The emulator has stopped. Reload the page to start again; Menu → Diagnostics says more.', true);
+  } else if (page.app) {
+    const status = endedStatus(page.app.name, page.ended.end);
+    setStatus(status.text, status.error);
+  }
+}
+
+async function onEmulatorEvent(name) {
+  if (name === 'emulator-stopped' || name === 'aborted' || name === 'broken') {
+    page.ended = { stopped: true };
+    showEnded();
+    return;
+  }
+  if (name !== 'app-exited') return;
+  // The launch this ending belongs to. The game can end before the launch
+  // request is answered (page.app is not set yet), and the visitor can start
+  // it again while the emulator is asked how it ended.
+  const launched = page.launched;
+  let end = null;
+  try {
+    const res = await page.emu.request('GET', '/v1/web/diag');
+    end = (res.ok ? ((res.json().exits || {}).lastApps || []).slice(-1)[0] : null) || null;
+  } catch (error) {
+    console.warn(error);
+  }
+  // An ending from before this launch is of the game that ran before.
+  if (page.launched !== launched || (end && end.at < launched)) return;
+  if (page.ended && page.ended.stopped) return;
+  page.ended = { end };
+  if (page.input) page.input.releaseAll();
+  showEnded();
+}
+
 async function restart() {
   if (!page.emu || !page.app) return;
+  // A stopped emulator answers no request: say so again and leave it.
+  if (page.ended && page.ended.stopped) { showEnded(); return; }
   const app = page.app;
   page.app = null;
   refreshControls();
@@ -1613,7 +1664,7 @@ function wireControls() {
     } catch {
       setStatus(link);
     }
-    setTimeout(() => { if (page.app && !statusEl.classList.contains('error')) setStatus(page.app.name); }, 4000);
+    setTimeout(() => { if (page.ended) showEnded(); else if (page.app && !statusEl.classList.contains('error')) setStatus(page.app.name); }, 4000);
   });
   entry('m-guide', () => { renderGuide(); $('guide').showModal(); });
   entry('m-info', async () => {
@@ -1683,8 +1734,18 @@ function startFpsReadout() {
     page.fps = ((frames - lastFrames) * 1000) / (now - lastTime);
     lastFrames = frames;
     lastTime = now;
-    if (params.get('fps') === '1' && page.app && !page.paused) setStatus(`${page.app.name} · ${page.fps.toFixed(1)} fps`);
+    if (params.get('fps') === '1' && page.app && !page.paused && !page.ended) setStatus(`${page.app.name} · ${page.fps.toFixed(1)} fps`);
   }, 1000);
+}
+
+// Whether the browser lets this page keep files.
+async function storageWorks() {
+  try {
+    await navigator.storage.getDirectory();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function loadSiteConfig() {
@@ -1713,8 +1774,8 @@ async function main() {
 
   // Start fetching what the address names before anything else: the
   // downloads then run while the emulator is compiled and started.
-  const persist = params.get('persist') !== '0';
-  page.downloads = Downloads.open({ persist, limitMB: params.has('cache') ? Number(params.get('cache')) : null });
+  const wantPersist = params.get('persist') !== '0';
+  page.downloads = Downloads.open({ persist: wantPersist, limitMB: params.has('cache') ? Number(params.get('cache')) : null });
   const wanted = wantedFromParams(params);
   const early = wanted ? startLoad(wanted) : null;
 
@@ -1745,6 +1806,12 @@ async function main() {
   page.emu = emu;
   window.eka2l1 = emu;
 
+  // A browser can have the storage the saves are kept in and refuse to use
+  // it (a private window in Firefox). The emulator would stop while starting
+  // there, so it is started without saving, and the diagnostics say why
+  // (diag/memory.js: "saves-not-kept").
+  const persist = wantPersist && await storageWorks();
+
   showStep('Starting emulator…');
   try {
     await emu.start({ canvas, persist, memoryMB });
@@ -1753,6 +1820,7 @@ async function main() {
     throw error;
   }
 
+  emu.onEvent((name) => { onEmulatorEvent(name).catch(reportError); });
   page.input = new Input((scancode, down) => { if (!page.paused) emu.key(scancode, down); });
   page.input.attachKeyboard();
   page.input.attachButtons(document.body);

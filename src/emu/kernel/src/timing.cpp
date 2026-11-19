@@ -24,6 +24,10 @@
 #include <common/platform.h>
 #include <common/thread.h>
 
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/speed.h>
+#endif
+
 #include <kernel/timing.h>
 
 #include <algorithm>
@@ -166,6 +170,10 @@ namespace eka2l1 {
             // Copy under the lock: register_event may grow the vector meanwhile
             timed_callback callback = event_types_[evt.event_type].callback;
             unq.unlock();
+
+#if EKA2L1_PLATFORM(WEB)
+            webdiag::speed.timer_fired(global_timer - evt.event_time);
+#endif
 
             if (callback) {
                 callback(evt.event_user_data, static_cast<int>(global_timer - evt.event_time));

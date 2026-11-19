@@ -23,6 +23,11 @@
 #include <common/algorithm.h>
 #include <common/configure.h>
 #include <common/log.h>
+#include <common/platform.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/speed.h>
+#endif
 
 #include <functional>
 #include <kernel/kernel.h>
@@ -131,7 +136,13 @@ namespace eka2l1::kernel {
             // Let free access to kernel now
             if (kern->should_core_idle_when_inactive()) {
                 kern->unlock();
+#if EKA2L1_PLATFORM(WEB)
+                webdiag::speed.idle.begin();
+#endif
                 idle_event.wait();
+#if EKA2L1_PLATFORM(WEB)
+                webdiag::speed.idle.end();
+#endif
                 kern->lock();
             }
         }

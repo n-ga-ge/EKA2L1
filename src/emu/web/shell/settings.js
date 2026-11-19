@@ -35,6 +35,8 @@ const DEFAULTS = {
   urls: { fw: '', game: '' },
   // The name the other players of a multiplayer room see.
   multiplayer: { name: 'Player' },
+  // Whether the performance overlay (diag/hud.js) is shown over the game.
+  overlay: false,
 };
 
 function load() {

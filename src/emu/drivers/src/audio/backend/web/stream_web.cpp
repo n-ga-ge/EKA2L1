@@ -3,6 +3,8 @@
 #include <drivers/audio/backend/web/audio_web.h>
 #include <drivers/audio/backend/web/stream_web.h>
 
+#include <common/webdiag/audio.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -41,6 +43,7 @@ namespace eka2l1::drivers {
             if (got < missing) {
                 // A short read ends the stream, as with the other backends.
                 ended_ = true;
+                webdiag::audio.streams_cut_short.fetch_add(1, std::memory_order_relaxed);
                 source_.resize((have + got) * channels);
             }
             have += got;
