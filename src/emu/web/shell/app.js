@@ -191,6 +191,7 @@ async function removeCard() {
 async function launch(app) {
   setStatus(`Starting ${app.name}…`);
   await page.emu.call('POST', `/v1/apps/${app.uid}/launch`);
+  performance.mark('eka2l1:launched'); // read back by the diagnostics, as the mark in wireSetup
   page.app = app;
   launches += 1;
   page.paused = false;
@@ -266,6 +267,7 @@ async function preparePhone(load) {
       showStep('Installing the N-Gage application…');
       await installFile(phone.app, 'ngage.sis', (path) => page.emu.call('POST', '/v1/apps', { path, type: 'sis' }));
       page.phone.app = true;
+      performance.mark('eka2l1:app-installed');
     }
   }
   load.installed('app');
@@ -285,7 +287,7 @@ async function installPhoneGame(source, expected) {
   const uid = expected && expected.uid ? String(expected.uid).toLowerCase() : null;
   const app = (installed.added || []).find((item) => String(item.uid).toLowerCase() === uid) || (installed.added || [])[0];
   if (!app) throw new Error('No game was found in the N-Gage 2.0 file');
-  performance.mark('eka2l1:game-installed');
+  performance.mark('eka2l1:game-installed', { detail: { frames: page.emu.frames() } }); // the count before the game draws, for diag/startup.js
   progress.load = null; // from here the status line belongs to the game
   await launch(app);
 }
@@ -318,7 +320,7 @@ async function installAndLaunch(source, name, expected = null) {
   const app = apps.find((item) => String(item.uid).toLowerCase() === uid) || apps[0];
   if (!app) throw new Error('No game was found on the card dump');
 
-  performance.mark('eka2l1:game-installed');
+  performance.mark('eka2l1:game-installed', { detail: { frames: page.emu.frames() } }); // the count before the game draws, for diag/startup.js
   progress.load = null; // from here the status line belongs to the game
   await launch(app);
 }
@@ -420,6 +422,7 @@ async function showSetup() {
 function wireSetup() {
   const run = (work) => async () => {
     setup.hidden = true;
+    performance.mark('eka2l1:load-begin'); // where the diagnostics count the wait from (diag/startup.js)
     try {
       await work();
       canvas.focus();
