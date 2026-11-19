@@ -52,9 +52,11 @@ namespace eka2l1::web {
                     const std::lock_guard<std::mutex> guard(state.wanted_shader_lock);
                     shader = state.wanted_shader;
                 }
-                if (!shader.empty()) {
-                    state.graphics_driver->set_upscale_shader(shader);
-                }
+                // An empty name puts the driver's plain shader back: a
+                // screen that locks its scale factor draws through the
+                // upscale program even when the page chose none, and would
+                // otherwise keep showing the last shader chosen.
+                state.graphics_driver->set_upscale_shader(shader);
                 state.use_upscale_shader = !shader.empty();
             }
         });

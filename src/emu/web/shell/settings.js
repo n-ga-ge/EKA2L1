@@ -17,6 +17,15 @@ const DEFAULTS = {
     // What fills the space beside the picture on a wide screen: 'none',
     // 'stretch' or 'ambient' (beta).
     fill: 'none',
+    // For a game with an enhancement profile: the size its 3D is drawn at.
+    // 'off' leaves it to the game, a number is that many times the guest's
+    // own resolution, 'auto' the size the picture is shown at (beta).
+    enhance: 'off',
+    // How textures are sampled there: 'nearest' or 'linear'.
+    enhanceFilter: 'nearest',
+    // How the game's flat picture (menus, text, logos, what it draws over
+    // its 3D) is enlarged with it: 'scaler', 'smooth' or 'sharp'.
+    enhanceFlat: 'scaler',
   },
   // 'auto' picks the running game's profile when there is one.
   profile: 'auto',
