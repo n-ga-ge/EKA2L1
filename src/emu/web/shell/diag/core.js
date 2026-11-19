@@ -306,8 +306,9 @@ export class Diagnostics {
     });
     copy.addEventListener('click', async () => {
       try {
-        await navigator.clipboard.writeText(this.tools.formatText(await this.report()));
-        this.note('Report copied.');
+        const report = await this.report();
+        await navigator.clipboard.writeText(this.tools.formatText(report));
+        this.note(report.redacted && report.redacted.failed ? 'Copied, but the report could only be made in part.' : 'Report copied.');
       } catch (error) {
         console.warn(error);
         this.note('The browser did not allow copying. Use "Download report".');
