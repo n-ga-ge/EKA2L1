@@ -209,6 +209,29 @@ test('redact: people in a map of ids, and below keys with more than one word', (
   assert.deepEqual(network, { player: '(name 1)', host: '(name 2)', audio: { player: 'tsf' } });
 });
 
+test('redact: maps of people, lists below a key that says nothing, a mark before a name, a host that is an address', () => {
+  const data = {
+    peers: { 1: 'Samantha', 2: null },
+    players: { Alexander: { score: 3 }, 7: { score: 1 } },
+    members: { list: ['Ricarda', 'Tobias'], count: 2 },
+    self: { name: 'Sam' },
+    link: { host: 'n-ga.ge', url: 'wss://n-ga.ge/net/room/KQZ7M2' },
+    lobby: { host: 'Omar', hostName: 'relay.example.org:8443' },
+    log: ['Samantha joined', 'Alexander left', 'Ricarda and tobias', 'set name 101FD3F6Sam', 'set name 101FD3FASam', 'flotsam and Samsung stay', 'see https://n-ga.ge/docs/'],
+  };
+  const out = redact(report({ errors: { title: 'Errors', data, findings: [] } }), { address: null });
+  assert.deepEqual(out.sections.errors.data, {
+    peers: { 1: '(name 1)', 2: null },
+    players: { '(name 2)': { score: 3 }, 7: { score: 1 } },
+    members: { list: ['(name 3)', '(name 4)'], count: 2 },
+    self: { name: '(name 5)' },
+    link: { host: 'n-ga.ge', url: 'wss://n-ga.ge/net/room/(room code 1)' },
+    lobby: { host: '(name 6)', hostName: 'relay.example.org:8443' },
+    log: ['(name 1) joined', '(name 2) left', '(name 3) and (name 4)', 'set name 101FD3F6(name 5)', 'set name 101FD3FA(name 5)', 'flotsam and Samsung stay', 'see https://n-ga.ge/docs/'],
+  });
+  assert.equal(out.redacted.names, 6);
+});
+
 test('redact: a room in an address is found whatever follows it', () => {
   const data = {
     a: 'could not join /net/room/KQZ7M2: full',
@@ -315,6 +338,14 @@ test('redact: never throws, and what it cannot look through does not leave', () 
     assert.match(out.generated, /^\d{4}-\d{2}-\d{2}T/);
     assert.ok(formatText(out).includes('Everything but this head was taken out'));
   }
+  // What is left says of the session what was true of it, and why the rest is gone.
+  const left = redact(cyclic, { address: null });
+  assert.deepEqual(left.game, cyclic.game);
+  assert.deepEqual(left.session, { upS: 95, running: true, paused: false, emulatorAnswers: true, samples: 0, measuredS: 0 });
+  const lines = formatText(left).split('\n');
+  assert.match(lines[0], /\| Elder Scrolls \(shadowkey, uid 0x101FD3F6\) \|/);
+  assert.match(lines[1], /^Session: running, up 95 s, 0 samples/);
+  assert.equal(lines[2], 'Everything but this head was taken out, because what identifies the visitor could not be removed (the report holds itself).');
   // Too deep to be data of a section: cut off, not followed.
   const out = redact(report({ memory: { title: 'Memory', data: deep, findings: [] } }), { address: null });
   assert.ok(!has(out, 'Robin'));
@@ -408,6 +439,13 @@ test('formatText: whatever a section holds comes out readable', () => {
     events: Array.from({ length: 30 }, (_, i) => ({ ms: i * 10, op: 'connect', result: 0 })),
     long: 'x'.repeat(1000),
     tricky: [{ text: 'a, b = c', quote: 'say "hi"' }],
+    // Keys that would not read back as keys: each value gets its own line.
+    counts: { 0: 5, 1: 7 },
+    byPeer: { '(name 1)': 4, b: 2 },
+    log: Array.from({ length: 40 }, (_, i) => `E files.cpp:1084 [Service.EFsrv]: Trying to open a non-existent file: e:\\system\\file${i}`),
+    stack: ['Error: boom', '    at run (https://example.org/play/b/abc/app.js:12:34)', '    at start (https://example.org/play/b/abc/app.js:99:1), then some more text to make it long'.padEnd(120, '.')],
+    // What the session section says of a game's 3D resolution: two texts.
+    enhance: { value: 'drawn at 2×, menus and text through the pixel-art scaler', note: 'Profile shadowkey, matches the game.' },
     looksLikeAnObject: 'mode=fast, size=2',
     looksLikeNumbers: '1, 2, 3',
     looksLikeQuoted: '"quoted"',
@@ -436,6 +474,16 @@ test('formatText: whatever a section holds comes out readable', () => {
     'events[29]: ms=290, op=connect, result=0',
     `long: ${'x'.repeat(400)}… (+600 characters)`,
     'tricky[0]: text="a, b = c", quote="say \\"hi\\""',
+    'counts.0: 5',
+    'counts.1: 7',
+    'byPeer.(name 1): 4',
+    'byPeer.b: 2',
+    'log: 40 values; the last 12:',
+    'log[28]: E files.cpp:1084 [Service.EFsrv]: Trying to open a non-existent file: e:\\system\\file28',
+    'log[39]: E files.cpp:1084 [Service.EFsrv]: Trying to open a non-existent file: e:\\system\\file39',
+    'stack[0]: Error: boom',
+    'stack[1]: at run (https://example.org/play/b/abc/app.js:12:34)',
+    'enhance: value="drawn at 2×, menus and text through the pixel-art scaler", note="Profile shadowkey, matches the game."',
     'looksLikeAnObject: "mode=fast, size=2"',
     'looksLikeNumbers: "1, 2, 3"',
     'looksLikeQuoted: "\\"quoted\\""',
@@ -447,6 +495,7 @@ test('formatText: whatever a section holds comes out readable', () => {
     'value: 42',
   ]) assert.ok(lines.includes(expected), `no line "${expected}" in\n${lines.join('\n')}`);
   assert.ok(!lines.includes('events[2]: ms=20, op=connect, result=0'));
+  assert.ok(!lines.some((line) => line.startsWith('log[27]')));
 });
 
 test('formatText: a large report is cut to the limit, the least useful first, and says so', () => {

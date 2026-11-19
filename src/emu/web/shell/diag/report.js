@@ -25,7 +25,8 @@
 //                   key about people or the link (peer, player, member, self,
 //                   link, room, lobby, bluetooth, bt, net, network,
 //                   multiplayer); the texts of a list or map of peers,
-//                   players or members
+//                   players or members, and the keys of such a map that are
+//                   not numbers. A "host" that is an address is not a name
 //   the same again  every room code and name found that way is also taken
 //                   out of every other text of the report, in either case
 //                   (an error message that quotes it, a finding that names a
@@ -63,6 +64,9 @@ const NAME_KEYS = new Set(['nick', 'nickname', 'username', 'playername', 'device
 // Keys that are a name when they stand below a key about people ("player"
 // below "audio" is the program that plays).
 const NAME_BELOW = new Set(['name', 'names', 'player', 'peer', 'member', 'host']);
+// "host" is the player who hosts, or the machine an address names: this is
+// the second, and stays.
+const HOST_ADDRESS = /^(localhost|[\w-]+(\.[\w-]+)+|\[[0-9a-f:]+\])(:\d+)?$|:\/\//i;
 // Containers that say nothing about what is in them.
 const NEUTRAL = new Set(['data', 'value', 'values', 'list', 'items', 'info', 'state']);
 // Texts that are never searched for a name found elsewhere: a player called
@@ -116,21 +120,25 @@ function inside(context, key) {
   return { key, words: words(key), upper: neutral ? context.upper : context.words, crowd: false, item: false, depth: context.depth + 1 };
 }
 
-// Calls visit(item, context, key) for everything in a list or an object.
+// Calls visit(item, context, key, named) for everything in a list or an
+// object; `named` says that the key itself is a person's name.
 function each(value, context, visit) {
-  const crowd = hasAny(context.words, CROWD);
+  // A key that says nothing ("list", "data") below "peers" is still about them.
+  const crowd = hasAny(context.words, CROWD) || (context.words.length > 0 && context.words.every((word) => NEUTRAL.has(word)) && hasAny(context.upper, CROWD));
   if (Array.isArray(value)) {
     for (const item of value) visit(item, { ...context, crowd: crowd && typeof item === 'string', item: true, depth: context.depth + 1 });
   } else if (value !== null && typeof value === 'object') {
     const entries = Object.entries(value);
-    // Under "peers" an object can be a map of ids: to names ({ "2": "Sam" },
-    // when every value is a text) or to peers ({ "2": { name: "Sam" } }, where
-    // the id is no more a key than the place in a list is).
+    // Under "peers" an object can be a map: of ids to names ({ "2": "Sam" },
+    // when every value is a text or nothing), or of ids or names to peers
+    // ({ "2": { name: "Sam" } }, { "Sam": { score: 3 } }). There a key is no
+    // more a key than the place in a list is, and one that is not a number
+    // is taken for a name.
     const map = crowd && !context.item;
-    const names = map && entries.length > 0 && entries.every(([, item]) => typeof item === 'string');
+    const names = map && entries.some(([, item]) => typeof item === 'string') && entries.every(([, item]) => item === null || typeof item === 'string');
     for (const [key, item] of entries) {
-      if (map && item !== null && typeof item === 'object' && !Array.isArray(item)) visit(item, { ...context, crowd: false, item: true, depth: context.depth + 1 }, key);
-      else visit(item, { ...inside(context, key), crowd: names }, key);
+      if (map && item !== null && typeof item === 'object' && !Array.isArray(item)) visit(item, { ...context, crowd: false, item: true, depth: context.depth + 1 }, key, !/^\d+$/.test(key));
+      else visit(item, { ...inside(context, key), crowd: names && typeof item === 'string' }, key, false);
     }
   }
 }
@@ -140,9 +148,10 @@ function whatIs(text, context) {
   const own = context.words;
   const only = own.length === 1 ? own[0] : null;
   if ((isRoomKey(own) || (only === 'code' && hasAny(context.upper, ROOMS))) && ROOM_SHAPE.test(text.trim())) return 'room';
-  if (context.crowd || isNameKey(own)) return 'name';
-  if (only !== null && NAME_BELOW.has(only) && hasAny(context.upper, PEOPLE)) return 'name';
-  return null;
+  if (context.crowd) return 'name';
+  const named = isNameKey(own) || (only !== null && NAME_BELOW.has(only) && hasAny(context.upper, PEOPLE));
+  if (named && own.includes('host') && HOST_ADDRESS.test(text.trim())) return null;
+  return named ? 'name' : null;
 }
 
 class Redactor {
@@ -194,15 +203,18 @@ class Redactor {
     if (value === null || typeof value !== 'object') return;
     if (this.open.has(value)) throw new Error('the report holds itself');
     this.open.add(value);
-    each(value, context, (item, inner) => this.learn(item, inner));
+    each(value, context, (item, inner, key, named) => {
+      if (named && key.trim()) this.place('name', key);
+      this.learn(item, inner);
+    });
     this.open.delete(value);
   }
 
   // What finds the room codes and the names in any text: one pattern for
   // each kind, the longest value first, and where its placeholder is. Both
   // are found in either case. A room code must stand as a word of its own; a
-  // name may have digits beside it, because a game puts its own mark before
-  // the player's name ("101FD3F6Sam").
+  // name may have digits beside it and a number in hexadecimal before it,
+  // because a game puts its own mark before the player's name ("101FD3FASam").
   searchFor() {
     const longest = (kind) => [...this.found[kind].keys()].filter((value) => value.length >= SHORTEST_SECRET).sort((p, q) => q.length - p.length);
     const search = [];
@@ -210,7 +222,7 @@ class Redactor {
     if (rooms.length) search.push({ pattern: new RegExp(`(^|[^\\p{L}\\p{N}])(${rooms.join('|')})(?![\\p{L}\\p{N}])`, 'giu'), place: (text) => this.found.room.get(cleanRoom(text)) });
     const names = longest('name');
     const lower = new Map(names.map((value) => [value.toLowerCase(), this.found.name.get(value)]));
-    if (names.length) search.push({ pattern: new RegExp(`(^|[^\\p{L}])(${names.map(escapeRegExp).join('|')})(?![\\p{L}])`, 'giu'), place: (text) => lower.get(text.toLowerCase()) });
+    if (names.length) search.push({ pattern: new RegExp(`(^|[^\\p{L}]|[0-9][0-9A-Fa-f]*)(${names.map(escapeRegExp).join('|')})(?![\\p{L}])`, 'giu'), place: (text) => lower.get(text.toLowerCase()) });
     return search;
   }
 
@@ -296,12 +308,11 @@ function isEnvelope(path) {
 const FAILURES = ['not a report', 'the report holds itself'];
 
 function bare(report, error) {
-  const from = report !== null && typeof report === 'object' ? report : {};
   const message = String(error && error.message ? error.message : error);
-  return {
+  const out = {
     kind: 'eka2l1-web-diagnostics',
-    v: Number.isInteger(from.v) ? from.v : 1,
-    generated: typeof from.generated === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]{1,20}Z$/.test(from.generated) ? from.generated : new Date().toISOString(),
+    v: 1,
+    generated: new Date().toISOString(),
     page: { address: '', hidden: false },
     game: null,
     session: { upS: null, running: false, paused: false, emulatorAnswers: false, samples: 0, measuredS: 0 },
@@ -310,6 +321,26 @@ function bare(report, error) {
     series: { t: [], fps: [], running: [], hidden: [] },
     redacted: { failed: FAILURES.includes(message) ? message : String((error && error.name) || 'error').slice(0, 40) },
   };
+  // What is true of the session and cannot identify anyone is kept, so that
+  // the envelope does not say "no game" of a game that ran: the numbers and
+  // switches of the session, and the game, which is the envelope's own.
+  try {
+    const from = report !== null && typeof report === 'object' ? report : {};
+    if (Number.isInteger(from.v)) out.v = from.v;
+    if (typeof from.generated === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]{1,20}Z$/.test(from.generated)) out.generated = from.generated;
+    const session = from.session !== null && typeof from.session === 'object' ? from.session : {};
+    for (const name of ['running', 'paused', 'emulatorAnswers']) {
+      if (typeof session[name] === 'boolean') out.session[name] = session[name];
+    }
+    if (Number.isInteger(session.upS) && session.upS >= 0) out.session.upS = session.upS;
+    const game = from.game;
+    if (game !== null && typeof game === 'object' && typeof game.name === 'string' && (typeof game.uid === 'string' || Number.isInteger(game.uid))) {
+      out.game = { uid: typeof game.uid === 'string' ? game.uid.slice(0, 40) : game.uid, name: game.name.slice(0, 200), slug: typeof game.slug === 'string' ? game.slug.slice(0, 80) : null };
+    }
+  } catch (failure) {
+    // Then it stays as bare as it was.
+  }
+  return out;
 }
 
 // Returns a copy of the report without anything that should not leave the
@@ -351,7 +382,8 @@ export function redact(report, options = {}) {
 //   == <Section title> [<id>] ==
 //   <name>: <value>              one line per value of the section's data;
 //   <name>.<inner>: <value>      what is nested gets a path, a small object
-//   <list>[0]: a=1, b=2          one line, a long list its size and its end
+//   <list>[0]: a=1, b=2          one line, a long list its size and its end,
+//   <log>[41]: <a line>          a list of long texts a line for each
 //
 //   == Series: <n> samples, one a second, oldest first ==
 //   fps: 19.8 20 ...
@@ -432,6 +464,24 @@ function showList(list, detail) {
     + `; the last ${shown.length}: ${text}`;
 }
 
+// A list of plain values is one line, unless it holds texts that are too
+// long for that (the lines of a log): then each is a line of its own, and of
+// a long list the last ones, which are the newest.
+function listInLines(list, detail) {
+  return list.some((value) => typeof value === 'string' && value.length > 60)
+    || (list.some((value) => typeof value === 'string') && showList(list, detail).length > 200);
+}
+
+function listLines(name, list, detail, out) {
+  if (!listInLines(list, detail)) {
+    out.push(`${name}: ${showList(list, detail)}`);
+    return;
+  }
+  const from = Math.max(0, list.length - detail.items);
+  if (from > 0) out.push(`${name}: ${list.length} values; the last ${list.length - from}:`);
+  for (let i = from; i < list.length; i++) out.push(`${name}[${i}]: ${showLine(list[i], detail.strings)}`);
+}
+
 // The lines of one value of a section's data. `detail` is how much is shown:
 // { strings, values, items }, the longest text, the most values of a list of
 // plain values, the most items of a list of objects.
@@ -443,7 +493,7 @@ function dataLines(path, value, detail, out, depth = 0) {
     if (!value.length) {
       out.push(`${name}: (none)`);
     } else if (value.every(isLeaf)) {
-      out.push(`${name}: ${showList(value, detail)}`);
+      listLines(name, value, detail, out);
     } else {
       const head = value.length > detail.items ? Math.min(2, detail.items - 1) : value.length;
       const tail = value.length > detail.items ? detail.items - head : 0;
@@ -457,7 +507,7 @@ function dataLines(path, value, detail, out, depth = 0) {
       out.push(`${name}: (empty)`);
       return;
     }
-    if (path && entries.length <= 8 && entries.every(([, item]) => isLeaf(item))) {
+    if (path && entries.length <= 8 && entries.every(([key, item]) => isLeaf(item) && /^[A-Za-z_$][\w$-]*$/.test(key))) {
       const inline = entries.map(([key, item]) => `${key}=${showInline(item, detail.strings)}`).join(', ');
       if (inline.length <= 140) {
         out.push(`${path}: ${inline}`);
@@ -514,7 +564,7 @@ function headLines(report) {
   if (session.emulatorAnswers === false) lines.push("The emulator's own counters are missing: this build does not have them.");
   const taken = report.redacted !== null && typeof report.redacted === 'object' ? report.redacted : null;
   if (taken && taken.failed) {
-    lines.push('Everything but this head was taken out, because what identifies the visitor could not be removed.');
+    lines.push(`Everything but this head was taken out, because what identifies the visitor could not be removed (${showLeaf(taken.failed, 80)}).`);
   } else if (taken) {
     const parts = [[taken.roomCodes, 'room code', 'room codes'], [taken.names, 'name', 'names'], [taken.bluetoothAddresses, 'Bluetooth address', 'Bluetooth addresses'],
       [taken.addressQueries, 'address query', 'address queries'], [taken.homeFolders, 'home folder', 'home folders']]
