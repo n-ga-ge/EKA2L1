@@ -1,9 +1,11 @@
 add_library(epocpkg
         include/package/manager.h
+        include/package/ngage2.h
         include/package/registry.h
         include/package/sis_script_interpreter.h
         include/package/sis_v1_installer.h
         src/manager.cpp
+        src/ngage2.cpp
         src/registry.cpp
         src/sis_script_interpreter.cpp
         src/sis_v1_installer.cpp)

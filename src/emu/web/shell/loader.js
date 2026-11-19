@@ -15,7 +15,8 @@
 //     emulator is still being compiled and started, and goes straight to
 //     storage. Nothing is held whole in memory.
 //   - On a site with a catalogue, <catalog>assets.json
-//     ({ fw: { bytes, sha256 }, games: { <slug>: { bytes, sha256 } } }) names
+//     ({ fw: { bytes, sha256 }, ngage2Device, ngage2App,
+//        games: { <slug>: { bytes, sha256 } } }) names
 //     each file's content. Such a file is requested as <url>?v=<sha256>, a
 //     URL whose content never changes, and kept under that URL for good; a
 //     new version of the file has a new URL.
@@ -24,7 +25,8 @@
 //     one HEAD request decides whether it is still current. When the server
 //     cannot be reached the stored copy is used.
 //   - The cache has a size bound. Past it the games used longest ago go; the
-//     firmware and the game being started stay.
+//     firmware (and an N-Gage 2.0 phone's device zip and application) and
+//     the game being started stay.
 //   - A download that is cut off leaves nothing usable behind: a file only
 //     gets its content when the whole of it has arrived, and only then is it
 //     entered in the index. The next visit simply downloads again.
@@ -35,7 +37,7 @@
 // either (some private windows) or with ?persist=0, downloads are held in
 // memory for the session and everything else works the same.
 
-import { firmwareUrl, gameBySlug, gameUrl, siteConfig } from './catalog.js';
+import { firmwareUrl, gameBySlug, gameUrl, phoneUrls, platformOf as platformOfEntry, siteConfig } from './catalog.js';
 
 // Folder in OPFS, and name of the fallback cache, that hold the files.
 const STORE_NAME = 'eka2l1-downloads-v1';
@@ -51,6 +53,10 @@ const LOCAL_FIRMWARE = new URL('.eka2l1-local/firmware', location.href).href;
 // A file without an entry is deleted once it is this old; a younger one may
 // be a download in progress, here or in another tab.
 const ORPHAN_MS = 60 * 60 * 1000;
+
+// Kinds of download that are never trimmed: the N-Gage firmware, and an N-Gage
+// 2.0 phone's device zip and N-Gage application.
+const KEPT_KINDS = ['fw', 'device', 'app'];
 
 const DEFAULT_LIMIT_MB = 512;
 const RECHECK_MS = 24 * 60 * 60 * 1000;
@@ -279,18 +285,20 @@ export class Downloads {
   // open(), which resolves to a stream of its bytes.
   source(key) {
     const known = this.notes[key];
+    // Looked up when it is read, not when the source was made: another tab
+    // may have stored the same download since and replaced the file.
+    const blob = async () => {
+      this.loadNotes();
+      const note = this.notes[key];
+      const found = note ? await this.place(note).read(note.file) : null;
+      if (!found) throw new Error('A stored download has gone missing. Reload the page to fetch it again.');
+      return found;
+    };
     return {
       key,
       bytes: known ? known.bytes : 0,
-      open: async () => {
-        // Looked up now, not when the source was made: another tab may have
-        // stored the same download since and replaced the file.
-        this.loadNotes();
-        const note = this.notes[key];
-        const blob = note ? await this.place(note).read(note.file) : null;
-        if (!blob) throw new Error('A stored download has gone missing. Reload the page to fetch it again.');
-        return blob.stream();
-      },
+      open: async () => (await blob()).stream(),
+      blob,
     };
   }
 
@@ -419,7 +427,7 @@ export class Downloads {
     const limit = everything ? 0 : await this.limit();
     let total = entries.reduce((sum, entry) => sum + entry.bytes, 0) + incoming;
     const removed = [];
-    for (const entry of entries.filter((item) => item.kind !== 'fw' && !keep.includes(item.key)).sort((a, b) => a.used - b.used)) {
+    for (const entry of entries.filter((item) => !KEPT_KINDS.includes(item.kind) && !keep.includes(item.key)).sort((a, b) => a.used - b.used)) {
       if (total <= limit) break;
       await this.remove(entry.key);
       total -= entry.bytes;
@@ -619,11 +627,24 @@ function assetsManifest() {
 }
 
 // What the page address asks for: { slug } for ?g=, { fw, game } for ?game=
-// (with or without ?fw=), or null.
+// (with or without ?fw=), { device, app, game } for an N-Gage 2.0 game given
+// by URLs (?device= names the phone's device zip, ?app= the N-Gage
+// application), or null.
 export function wantedFromParams(params) {
   if (params.get('g')) return { slug: params.get('g'), fw: params.get('fw') || '' };
+  if (params.get('game') && params.get('device')) return { device: params.get('device'), app: params.get('app') || '', game: params.get('game') };
   if (params.get('game')) return { fw: params.get('fw') || '', game: params.get('game') };
   return null;
+}
+
+// What `wanted` runs on, 'ngage' or 'ngage2', as soon as that is known: at
+// once for URLs, after one look at the catalogue for a game named by slug.
+// The page needs it before it starts the emulator (an N-Gage 2.0 phone needs
+// a larger memory).
+export async function platformOf(wanted) {
+  if (!wanted) return 'ngage';
+  if (wanted.slug) return platformOfEntry(await gameBySlug(wanted.slug));
+  return wanted.device ? 'ngage2' : 'ngage';
 }
 
 async function resolveSlug(slug) {
@@ -645,6 +666,7 @@ async function resolveSlug(slug) {
     slug,
     title: game.title || slug,
     uid: game.uid || null,
+    platform: platformOfEntry(game),
     gameUrl: url,
     expect: manifest && manifest.games ? validHash(manifest.games[game.slug || slug]) : null,
     label: game.title || slug,
@@ -655,7 +677,7 @@ async function resolveSlug(slug) {
 function resolveUrls(wanted) {
   if (!wanted.game) throw new Error('Enter the URL of a game card dump.');
   const parsed = checkedUrl(wanted.game, 'Game');
-  return { slug: null, title: null, uid: null, gameUrl: wanted.game, expect: null, label: 'Game', name: parsed.pathname.split('/').pop() || 'game.zip' };
+  return { slug: null, title: null, uid: null, platform: wanted.device ? 'ngage2' : 'ngage', gameUrl: wanted.game, expect: null, label: 'Game', name: parsed.pathname.split('/').pop() || 'game.zip' };
 }
 
 function taskText(task) {
@@ -669,11 +691,15 @@ function taskText(task) {
 // Starts fetching what `wanted` names and returns at once:
 //   target    resolves to what is being loaded ({ title, uid, gameUrl, ... }),
 //             or rejects when the catalogue has no such game
+//   platform  resolves to what the game runs on, 'ngage' or 'ngage2'
 //   firmware  resolves to a source for the firmware, or null when none is
-//             named and none is stored
+//             named and none is stored (always null for an N-Gage 2.0 game)
+//   phone     for an N-Gage 2.0 game, resolves to { device, app }: sources
+//             for the phone's device zip and the N-Gage application (app is
+//             null when a load by URLs names none); null for any other game
 //   card      resolves to a source for the game card
 //   summary() entries for the status line, one per file not installed yet
-//   installed(kind) says the firmware ('fw') or the game is in the emulator,
+//   installed(kind) says the firmware ('fw', or 'device' and 'app') or the game is in the emulator,
 //             which takes it off the summary
 //   finished() notes that the game was used, trims the cache to its bound
 //             and clears out what interrupted downloads left
@@ -684,11 +710,13 @@ function taskText(task) {
 export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: wantFirmware = true }) {
   performance.mark('eka2l1:fetch-begin', { detail: { firmware: wantFirmware } }); // for the diagnostics, as markFetched
   const controller = new AbortController();
-  const tasks = { fw: null, game: null };
-  const sources = { fw: null, game: null };
-  const hidden = { fw: false, game: false };
-  const verify = { fw: null, game: null }; // sha256 each file should have
-  const keep = () => [sources.fw, sources.game].filter(Boolean).map((source) => source.key);
+  const KINDS = ['fw', 'device', 'app', 'game'];
+  const tasks = { fw: null, device: null, app: null, game: null };
+  const sources = { fw: null, device: null, app: null, game: null };
+  const hidden = { fw: false, device: false, app: false, game: false };
+  const verify = { fw: null, device: null, app: null, game: null }; // sha256 each file should have
+  const keep = () => Object.values(sources).filter(Boolean).map((source) => source.key);
+  const platform = platformOf(wanted);
 
   let last = 0;
   let timer = 0;
@@ -705,7 +733,7 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
   const target = Promise.resolve().then(() => (wanted.slug ? resolveSlug(wanted.slug) : resolveUrls(wanted)));
 
   const firmware = (async () => {
-    if (!wantFirmware) return null;
+    if (!wantFirmware || (await platform) !== 'ngage') return null;
     const url = wanted.fw || (wanted.slug ? await firmwareUrl() : '');
     if (!url) return (await downloads).firmware();
     const manifest = wanted.fw ? null : await assetsManifest();
@@ -714,6 +742,39 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
     sources.fw = await fetchAsset(downloads, { kind: 'fw', label: 'Firmware', url, expect: manifest && manifest.fw }, tasks.fw, report, controller.signal, keep);
     markFetched('eka2l1:firmware-fetched', tasks.fw, sources.fw);
     return sources.fw;
+  })();
+
+  // An N-Gage 2.0 game: the phone's device zip and the N-Gage application,
+  // both fetched at once.
+  const phone = (async () => {
+    if ((await platform) !== 'ngage2' || !wantFirmware) return null;
+    const urls = wanted.slug ? await phoneUrls() : { device: wanted.device, app: wanted.app || null };
+    if (!urls.device || (wanted.slug && !urls.app)) {
+      throw new LoadError('no-firmware', 'This is an N-Gage 2.0 game, and this site does not say where the phone it runs on is downloaded from.');
+    }
+    const manifest = wanted.slug ? await assetsManifest() : null;
+    const one = async (kind, label, url, expect) => {
+      if (!url) return null;
+      if (validHash(expect)) verify[kind] = expect.sha256;
+      tasks[kind] = { label, from: null, loaded: 0, total: 0, done: false };
+      sources[kind] = await fetchAsset(downloads, { kind, label, url, expect }, tasks[kind], report, controller.signal, keep);
+      return sources[kind];
+    };
+    const [device, app] = await Promise.all([
+      one('device', 'Phone firmware', urls.device, manifest && manifest.ngage2Device),
+      one('app', 'N-Gage application', urls.app, manifest && manifest.ngage2App),
+    ]);
+    // An older phone or application (a new version, or another URL) is of no
+    // use any more: these kinds are never trimmed, so they go here.
+    const cache = await downloads;
+    const current = [device, app].filter(Boolean).map((source) => source.key);
+    cache.loadNotes();
+    for (const key of cache.keys()) {
+      const note = cache.notes[key];
+      if (note && (note.kind === 'device' || note.kind === 'app') && !current.includes(key)) await cache.remove(key);
+    }
+    performance.mark('eka2l1:phone-fetched');
+    return { device, app };
   })();
 
   let card = null;
@@ -735,19 +796,21 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
   // The card is fetched at once, except when no firmware is in sight (a
   // game address without one, and none kept): then it waits until it is
   // asked for, instead of downloading a card that cannot be started.
-  if (!wantFirmware || wanted.fw || wanted.slug) fetchCard();
+  if (!wantFirmware || wanted.fw || wanted.slug || wanted.device) fetchCard();
   else firmware.then((found) => { if (found) fetchCard(); }, () => {});
 
   // They are awaited later; a failure before that is not an unhandled one.
-  for (const promise of [target, firmware]) promise.catch(() => {});
+  for (const promise of [target, platform, firmware, phone]) promise.catch(() => {});
 
   return {
     wanted,
     tasks,
     target,
+    platform,
     firmware,
+    phone,
     get card() { return fetchCard(); },
-    summary: () => ['fw', 'game'].map((kind) => (hidden[kind] ? null : taskText(tasks[kind]))).filter(Boolean),
+    summary: () => KINDS.map((kind) => (hidden[kind] ? null : taskText(tasks[kind]))).filter(Boolean),
     installed: (kind) => { hidden[kind] = true; },
     cancel: () => controller.abort(),
     async finished() {
@@ -758,7 +821,7 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
       // What was downloaded just now under a content address is checked
       // against it once; a file that is not what its name says is dropped,
       // so the next visit fetches it again.
-      for (const kind of ['fw', 'game']) {
+      for (const kind of KINDS) {
         const hash = verify[kind];
         if (!hash || !sources[kind] || tasks[kind].from !== 'network') continue;
         const good = await cache.verify(sources[kind].key, hash).catch(() => true);
@@ -776,5 +839,5 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
 // diagnostics, as in markFetched.
 export function fileSource(file) {
   performance.mark('eka2l1:file-picked', { detail: { bytes: file.size } });
-  return { key: null, bytes: file.size, open: async () => file.stream() };
+  return { key: null, bytes: file.size, open: async () => file.stream(), blob: async () => file };
 }

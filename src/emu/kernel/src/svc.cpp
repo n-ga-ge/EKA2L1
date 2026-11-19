@@ -2433,6 +2433,43 @@ namespace eka2l1::epoc {
         return static_cast<std::int32_t>(thr->get_priority());
     }
 
+    BRIDGE_FUNC(std::int32_t, thread_process_priority, kernel::handle h) {
+        thread_ptr thr = kern->get<kernel::thread>(h);
+
+        if (!thr) {
+            return epoc::error_bad_handle;
+        }
+
+        return static_cast<std::int32_t>(thr->owning_process()->get_priority());
+    }
+
+    BRIDGE_FUNC(void, thread_set_process_priority, kernel::handle h, std::int32_t process_pri) {
+        thread_ptr thr = kern->get<kernel::thread>(h);
+
+        if (!thr) {
+            return;
+        }
+
+        switch (static_cast<kernel::process_priority>(process_pri)) {
+        case kernel::process_priority::low:
+        case kernel::process_priority::background:
+        case kernel::process_priority::foreground:
+        case kernel::process_priority::high:
+        case kernel::process_priority::window_svr:
+        case kernel::process_priority::file_svr:
+        case kernel::process_priority::real_time_svr:
+        case kernel::process_priority::supervisor:
+            break;
+
+        default:
+            // The kernel panics the caller; storing it would make the scheduler fall back to its lowest row.
+            LOG_ERROR(KERNEL, "Invalid process priority {} for thread {}", process_pri, thr->name());
+            return;
+        }
+
+        thr->owning_process()->set_priority(static_cast<kernel::process_priority>(process_pri));
+    }
+
     BRIDGE_FUNC(void, thread_resume, kernel::handle h) {
         thread_ptr thr = kern->get<kernel::thread>(h);
 
@@ -6082,6 +6119,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x29, thread_suspend),
         BRIDGE_REGISTER(0x2A, thread_priority),
         BRIDGE_REGISTER(0x2B, thread_set_priority),
+        BRIDGE_REGISTER(0x2C, thread_process_priority),
+        BRIDGE_REGISTER(0x2D, thread_set_process_priority),
         BRIDGE_REGISTER(0x2E, thread_flags),
         BRIDGE_REGISTER(0x2F, thread_set_flags),
         BRIDGE_REGISTER(0x30, thread_request_count),
@@ -6273,6 +6312,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x29, thread_suspend),
         BRIDGE_REGISTER(0x2A, thread_priority),
         BRIDGE_REGISTER(0x2B, thread_set_priority),
+        BRIDGE_REGISTER(0x2C, thread_process_priority),
+        BRIDGE_REGISTER(0x2D, thread_set_process_priority),
         BRIDGE_REGISTER(0x2E, thread_flags),
         BRIDGE_REGISTER(0x2F, thread_set_flags),
         BRIDGE_REGISTER(0x30, thread_request_count),
@@ -6461,6 +6502,8 @@ namespace eka2l1::epoc {
         BRIDGE_REGISTER(0x29, thread_suspend),
         BRIDGE_REGISTER(0x2A, thread_priority),
         BRIDGE_REGISTER(0x2B, thread_set_priority),
+        BRIDGE_REGISTER(0x2C, thread_process_priority),
+        BRIDGE_REGISTER(0x2D, thread_set_process_priority),
         BRIDGE_REGISTER(0x2E, thread_flags),
         BRIDGE_REGISTER(0x2F, thread_set_flags),
         BRIDGE_REGISTER(0x30, thread_request_count),

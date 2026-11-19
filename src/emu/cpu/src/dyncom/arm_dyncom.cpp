@@ -17,6 +17,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
 #include <cpu/dyncom/arm_dyncom.h>
 #include <cpu/dyncom/arm_dyncom_interpreter.h>
 #include <cpu/dyncom/arm_dyncom_trans.h>
@@ -39,6 +40,7 @@ namespace eka2l1::arm {
     }
 
     void dyncom_core::run(const std::uint32_t instruction_count) {
+        apply_pending_hooks();
         ticks_executed_ = 0;
         state_->NumInstrsToExecute = instruction_count;
 
@@ -50,6 +52,7 @@ namespace eka2l1::arm {
     }
 
     void dyncom_core::step() {
+        apply_pending_hooks();
         ticks_executed_ = 0;
         state_->NumInstrsToExecute = 1;
 
@@ -174,6 +177,38 @@ namespace eka2l1::arm {
 
     void dyncom_core::imb_range(address addr, std::size_t size) {
         clear_instruction_cache();
+    }
+
+    bool dyncom_core::set_hooks(const std::vector<address> &addresses) {
+        std::vector<std::uint32_t> sorted;
+        sorted.reserve(addresses.size());
+        for (const address addr : addresses) {
+            sorted.push_back(addr & ~1U);
+        }
+        std::sort(sorted.begin(), sorted.end());
+        sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+        // Any thread may ask; the list is swapped in by the thread that runs
+        // the core, between two quanta, because that needs the translated
+        // blocks thrown away.
+        const std::lock_guard<std::mutex> guard(hooks_lock_);
+        hooks_wanted_ = std::move(sorted);
+        hooks_pending_ = true;
+        return true;
+    }
+
+    void dyncom_core::apply_pending_hooks() {
+        if (!hooks_pending_.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        const std::lock_guard<std::mutex> guard(hooks_lock_);
+        hooks_pending_ = false;
+
+        if (hooks_wanted_ != state_->hook_addrs) {
+            state_->hook_addrs = hooks_wanted_;
+            clear_instruction_cache();
+        }
     }
 
     void dyncom_core::set_asid(const std::uint32_t asid) {
