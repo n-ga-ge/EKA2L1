@@ -298,6 +298,9 @@ export class Diagnostics {
   wire() {
     const { dialog, copy, download } = this.ui;
     dialog.addEventListener('close', () => {
+      // The event arrives after the fact: a dialog closed and opened again at
+      // once is open by now, and its timer must stay.
+      if (dialog.open) return;
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
     });
