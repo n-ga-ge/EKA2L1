@@ -9,7 +9,12 @@
 #include <cassert>
 #include <cinttypes>
 #include <common/log.h>
+#include <common/platform.h>
 #include <common/types.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/speed.h>
+#endif
 #include <cpu/dyncom/arm_dyncom_dec.h>
 #include <cpu/dyncom/arm_dyncom_interpreter.h>
 #include <cpu/dyncom/arm_dyncom_run.h>
@@ -2734,7 +2739,14 @@ DISPATCH : {
                 cpu->instruction_cache.clear();
                 cpu->trans_cache_buf_top = 0;
                 cpu->flush_block_l1_cache();
+#if EKA2L1_PLATFORM(WEB)
+                eka2l1::webdiag::speed.cache_flushes.fetch_add(1, std::memory_order_relaxed);
+#endif
             }
+
+#if EKA2L1_PLATFORM(WEB)
+            eka2l1::webdiag::speed.cache_blocks.fetch_add(1, std::memory_order_relaxed);
+#endif
 
             if (cpu->NumInstrsToExecute != 1) {
                 if (InterpreterTranslateBlock(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
