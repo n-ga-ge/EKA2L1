@@ -22,6 +22,11 @@
 #include <drivers/graphics/graphics.h>
 #include <drivers/itc.h>
 
+#include <common/platform.h>
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/graphics.h>
+#endif
+
 #include <chrono>
 #include <cstring>
 
@@ -41,6 +46,11 @@ namespace eka2l1::drivers {
 
         cmd_list.size_ = 1;
         *cmd_list.base_ = cmd;
+
+#if EKA2L1_PLATFORM(WEB)
+        webdiag::graphics.sync_commands.fetch_add(1, std::memory_order_relaxed);
+        const webdiag::timed waited(webdiag::graphics.sync_wait_us);
+#endif
 
         std::unique_lock<std::mutex> ulock(drv->mut_);
         drv->submit_command_list(cmd_list);
