@@ -5,7 +5,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include <cpu/12l1r/tlb.h>
 #include <cpu/arm_interface.h>
@@ -28,6 +31,12 @@ namespace eka2l1::arm {
         r12l1::tlb mem_cache_;
 
         std::uint32_t ticks_executed_;
+
+        std::mutex hooks_lock_;
+        std::vector<std::uint32_t> hooks_wanted_;
+        std::atomic<bool> hooks_pending_{ false };
+
+        void apply_pending_hooks();
 
         // True once the scheduler starts feeding us asids (primary core). While
         // false (e.g. the dyncom interpreter embedded in another backend as a
@@ -81,6 +90,7 @@ namespace eka2l1::arm {
         void clear_instruction_cache() override;
 
         void imb_range(address addr, std::size_t size) override;
+        bool set_hooks(const std::vector<address> &addresses) override;
 
         void set_asid(const std::uint32_t asid) override;
 
