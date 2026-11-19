@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { FRAMES_KEPT, LINES, Pacer, WINDOW_MS, ceiling, drawCost, lineTexts, pacing, rateColumns, summary, topFindings, wanted } from '../shell/diag/hud.js';
+import { FRAMES_KEPT, LINES, Pacer, WINDOW_MS, ceiling, drawCost, lineTexts, pacing, rateColumns, summary, topFindings, wanted, withoutDiag } from '../shell/diag/hud.js';
 
 const sample = (second, frames, more = {}) => ({ t: second * 1000, frames, running: true, hidden: false, app: 1, graphicsBusyMs: frames * 4, ...more });
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} is not ${expected}`);
@@ -22,6 +22,17 @@ test('wanted: the address decides, else the remembered choice', () => {
   assert.equal(wanted(params(''), undefined), false);
   assert.equal(wanted(params('diag=yes'), true), true);
   assert.equal(wanted(params('fps=1'), false), false);
+});
+
+test('withoutDiag: takes the parameter out of an address and leaves the rest as written', () => {
+  assert.equal(withoutDiag(''), '');
+  assert.equal(withoutDiag('?diag=1'), '');
+  assert.equal(withoutDiag('?diag'), '');
+  assert.equal(withoutDiag('?g=shadowkey&diag=0'), '?g=shadowkey');
+  assert.equal(withoutDiag('?diag=1&g=shadowkey'), '?g=shadowkey');
+  assert.equal(withoutDiag('?fw=/local/NGAGE.ROM&diag=1&game=/local/a%20b.zip'), '?fw=/local/NGAGE.ROM&game=/local/a%20b.zip');
+  assert.equal(withoutDiag('?diagnose=1&fps=1'), '?diagnose=1&fps=1');
+  assert.equal(withoutDiag('?diag=1&diag=0&fps=1'), '?fps=1');
 });
 
 test('ceiling: the first step the value fits under, the last when none does', () => {

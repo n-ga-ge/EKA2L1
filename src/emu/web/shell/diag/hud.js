@@ -70,6 +70,13 @@ export function wanted(params, stored) {
   return stored === true;
 }
 
+// An address's query (location.search) without its `diag` parameter, the
+// rest left as it was written.
+export function withoutDiag(search) {
+  const kept = search.replace(/^\?/, '').split('&').filter((part) => part && part !== 'diag' && !part.startsWith('diag='));
+  return kept.length ? `?${kept.join('&')}` : '';
+}
+
 export function ceiling(value, steps) {
   return steps.find((step) => step >= value) ?? steps[steps.length - 1];
 }
@@ -536,9 +543,7 @@ export function setupHud(diag, params) {
       // (app.js puts its parameters into the links it makes).
       if (!params.has('diag')) return;
       params.delete('diag');
-      const address = new URL(location.href);
-      address.searchParams.delete('diag');
-      history.replaceState(history.state, '', address);
+      history.replaceState(history.state, '', location.pathname + withoutDiag(location.search) + location.hash);
     });
     diag.page.hud = hud;
     hud.set(wanted(params, settings.overlay));
