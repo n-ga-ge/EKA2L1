@@ -47,7 +47,7 @@ const PLAYER_FILE = /\/(eka2l1_web\.(?:js|wasm|data))(?:[?#].*)?$/;
 const WATCH_TICK_MS = 25;
 const WATCH_SLOW_MS = 1000;
 const WATCH_FAST_FOR_MS = 120000;
-const KEPT_CHANGES = 200;
+const KEPT_CHANGES = 1000;
 // The browser keeps 250 records of requests unless told otherwise, and drops
 // what comes after: a long visit would lose those of a later load.
 const RESOURCE_RECORDS = 1500;
@@ -61,11 +61,14 @@ const DOWNLOAD_MIN_MS = 5000;
 // second is half a minute to a minute of waiting.
 const SLOW_BYTES_PER_S = 1048576;
 // The work the device does itself (start the emulator, install the firmware
-// and the game, bring the game to its first picture) took 5 to 7 seconds for
-// a game of 12 MB on the development laptop while it was busy with other
-// work, 15 with a third of one processor core and 39 with a sixth; the largest
-// game (54 MB) takes a few seconds longer to install. See docs/diagnostics.md.
+// or the phone and the game, bring the game to its first picture) took 1 to
+// 3 seconds for an original N-Gage game on the development laptop and 5 to 7
+// for an N-Gage 2.0 game; 11 seconds with a third of one processor core and
+// 26 with a sixth. docs/diagnostics.md has the measurements.
 const START_SLOW_MS = 15000;
+// The same for an N-Gage 2.0 game, whose phone takes longer to install:
+// 5 to 7 seconds on that laptop, 29 with a third of a core, 65 with a sixth.
+const PHONE_START_SLOW_MS = 40000;
 
 const round = (value) => Math.round(value);
 const finite = (value) => (Number.isFinite(value) ? value : null);
@@ -79,12 +82,39 @@ export function fromBrowserCache(entry) {
   return entry.transfer < entry.encoded;
 }
 
+// What ends a step of a load, and the mark that says its file was at hand.
+// An original N-Gage game installs the firmware and the game; an N-Gage 2.0
+// game the phone (its device zip), the N-Gage application and the game, and
+// its "phone-fetched" says that the device zip and the application are both
+// there.
+const INSTALLS = {
+  'firmware-installed': { id: 'fw-install', download: 'fw-download', wait: 'firmware', device: true },
+  'device-installed': { id: 'device-install', download: 'phone-download', wait: 'phone', device: true },
+  'app-installed': { id: 'app-install' },
+  'game-installed': { id: 'game-install', download: 'game-download', wait: 'game' },
+};
+// Marks that end no step: where a load begins, where a file went to the
+// emulator, the emulator's own start, and the loader's tidying afterwards.
+const NO_STEP = /^(load-begin|fetch-begin|launched|file-picked|ready|cache-trimmed|boot:.*|uploaded:.*|.*-fetched)$/;
+
 // The loads the marks tell of, oldest first. A load begins with "load-begin"
 // (a button of the loader) or, for the game the page address names, with the
 // loader's "fetch-begin"; after a click the loader's mark belongs to the load
 // the click opened. A page that makes neither mark still gets separate
 // loads: once a game is installed the next event opens a new one, which then
 // begins at that event, and a load nothing opened has `began` null.
+//
+// A load is
+//   files   [{ kind, t, from, bytes, began, asked, url }], one per
+//           "<kind>-fetched" mark that says where its bytes came from
+//   at      { <kind>: t }: when each "<kind>-fetched" mark was made
+//   touched whether anything followed its beginning (a click that came to
+//           nothing leaves a load without)
+//   ends    [{ name, t, copied, picked }]: the marks that end a step, in
+//           their order: the installs, and any mark this section does not
+//           know, which becomes a step under its own name. `copied` is when
+//           the file was handed to the emulator, `picked` the picked file
+//           ({ bytes }) that was installed
 //
 // Which picked file is the firmware and which upload was whose is told by
 // the order of the marks, not by their times: marks made in one turn of the
@@ -95,54 +125,62 @@ export function splitLoads(marks) {
   let pick = null; // a picked file no install has claimed yet
   let upload = null; // the same for a file handed to the emulator
   const open = (began) => {
-    load = { began, fetching: false, wantFirmware: null, fwFetched: null, fwCopied: null, fwInstalled: null, pickedFirmware: null,
-      gameFetched: null, gameCopied: null, gameInstalled: null, pickedGame: null, launched: null, events: 0 };
+    load = { began, touched: false, fetching: false, wantFirmware: null, files: [], at: {}, ends: [], gameInstalled: null, launched: null };
     loads.push(load);
     pick = null;
     upload = null;
   };
   for (const mark of marks) {
     const detail = mark.detail && typeof mark.detail === 'object' ? mark.detail : {};
-    if (mark.name === 'load-begin') {
+    const name = mark.name;
+    const done = load && load.gameInstalled !== null;
+    if (name === 'load-begin') {
       open(mark.t);
-    } else if (mark.name === 'fetch-begin') {
-      if (!load || load.fetching || load.events) open(mark.t);
+    } else if (name === 'fetch-begin') {
+      if (!load || load.touched) open(mark.t);
+      load.touched = true;
       load.fetching = true;
-      // Whether this load installs a firmware (none is installed yet).
+      // Whether this load installs a firmware or a phone (none is installed yet).
       load.wantFirmware = typeof detail.firmware === 'boolean' ? detail.firmware : null;
-    } else if (mark.name === 'launched') {
+    } else if (name === 'launched') {
       // The first launch after the install; later ones are restarts.
-      if (load && load.gameInstalled !== null && load.launched === null) load.launched = mark.t;
-    } else if (mark.name.startsWith('uploaded:') || ['firmware-fetched', 'game-fetched', 'file-picked', 'firmware-installed', 'game-installed'].includes(mark.name)) {
+      if (done && load.launched === null) load.launched = mark.t;
+    } else if (name === 'file-picked' || name.startsWith('uploaded:') || name.endsWith('-fetched') || INSTALLS[name]) {
       if (!load) open(null);
-      else if (load.gameInstalled !== null) open(mark.t);
-      load.events++;
-      if (mark.name.startsWith('uploaded:')) {
-        upload = mark.t;
-      } else if (mark.name === 'file-picked') {
+      else if (done) open(mark.t);
+      load.touched = true;
+      if (name === 'file-picked') {
         pick = { bytes: finite(detail.bytes) };
-      } else if (mark.name === 'firmware-installed') {
-        Object.assign(load, { fwInstalled: mark.t, fwCopied: upload, pickedFirmware: pick });
-        pick = null;
-        upload = null;
-      } else if (mark.name === 'game-installed') {
-        Object.assign(load, { gameInstalled: mark.t, gameCopied: upload, pickedGame: pick });
-        pick = null;
-        upload = null;
+      } else if (name.startsWith('uploaded:')) {
+        upload = mark.t;
+      } else if (name.endsWith('-fetched')) {
+        const kind = name.slice(0, -8);
+        load.at[kind] = mark.t;
+        if (detail.from === 'cache' || detail.from === 'network') {
+          load.files.push({ kind, t: mark.t, from: detail.from, bytes: finite(detail.bytes), began: finite(detail.began), asked: Boolean(detail.asked),
+            memory: Boolean(detail.memory), url: typeof detail.url === 'string' ? detail.url : null });
+        }
       } else {
-        const fetched = { t: mark.t, from: detail.from === 'cache' || detail.from === 'network' ? detail.from : null,
-          bytes: finite(detail.bytes), began: finite(detail.began), asked: Boolean(detail.asked), url: typeof detail.url === 'string' ? detail.url : null };
-        if (mark.name === 'firmware-fetched') load.fwFetched = fetched;
-        else load.gameFetched = fetched;
+        load.ends.push({ name, t: mark.t, copied: upload, picked: pick });
+        if (name === 'game-installed') load.gameInstalled = mark.t;
+        pick = null;
+        upload = null;
       }
+    } else if (load && !done && !NO_STEP.test(name)) {
+      // A mark of a load that this section does not know: a step all the same.
+      load.touched = true;
+      load.ends.push({ name, t: mark.t, copied: null, picked: null });
     }
   }
   return loads;
 }
 
-// How much of [from, to] the page spent in the background. `changes` is
-// [{ t, hidden }], oldest first; before the first one the page counts as shown.
+// How much of [from, to] the page spent in the background, or null when that
+// is not known. `changes` is [{ t, hidden }], oldest first, and says nothing
+// about the time before its first entry (the oldest are dropped on a long
+// visit).
 export function hiddenBetween(changes, from, to) {
+  if (!changes.length || changes[0].t > from) return null;
   let total = 0;
   for (let i = 0; i < changes.length; i++) {
     if (!changes[i].hidden) continue;
@@ -174,7 +212,8 @@ function unionLength(spans) {
 //   pageReady   when the page's script began, or null
 //   watches     [{ installed, firstFrame }]: per installed game (`installed`
 //               is the time of its mark), when it had drawn
-//   visibility  [{ t, hidden }]: when the page went to the background and back
+//   visibility  [{ t, hidden }]: when the page went to the background and
+//               back, from the state it was opened in
 //   kept        whether downloads outlive the visit; null when not known
 // Times are milliseconds since the page was opened. Returns null when there
 // is nothing to tell.
@@ -189,7 +228,9 @@ export function timeline({ marks = [], resources = [], navigation = null, pageRe
   };
   const ready = first('ready');
   const loads = splitLoads(marks);
-  const load = loads.length ? loads[loads.length - 1] : null;
+  // A click that came to nothing (no game was named) is not a load to show:
+  // the timeline before it stays.
+  const load = [...loads].reverse().find((item) => item.touched) || null;
   // A load that began while the emulator was still starting is the page
   // address's: the visitor has been waiting since the page was opened.
   const withPage = !load || load.began === null || ready === null || load.began < ready;
@@ -274,38 +315,58 @@ export function timeline({ marks = [], resources = [], navigation = null, pageRe
     const began = fetched.began === null ? null : Math.min(fetched.began, fetched.t);
     const file = { what, bytes: fetched.bytes, ms: began === null ? null : round(fetched.t - began), from };
     if (fetched.asked) file.asked = true;
+    if (fetched.memory) file.memory = true;
     if (from === 'network' && began !== null) spans.push({ start: began, end: fetched.t, bytes: fetched.bytes || 0 });
     downloads.push(file);
     return from;
   };
-  const copied = (at, cut) => (at === null ? {} : { copyMs: Math.min(Math.max(round(at) - cut.begin, 0), cut.step.ms) });
-
   if (load) {
     // The files are listed whether or not their steps can be told yet.
-    const fwFrom = load.fwFetched ? fetchedFile('firmware', load.fwFetched) : null;
-    if (!load.fwFetched && load.pickedFirmware) downloads.push({ what: 'firmware', bytes: load.pickedFirmware.bytes, ms: null, from: 'file' });
-    const gameFrom = load.gameFetched ? fetchedFile('game', load.gameFetched) : null;
-    if (!load.gameFetched && load.pickedGame) downloads.push({ what: 'game', bytes: load.pickedGame.bytes, ms: null, from: 'file' });
+    const sources = {};
+    for (const file of load.files) sources[file.kind] = fetchedFile(file.kind, file);
+    // The phone of an N-Gage 2.0 game is two files with one wait.
+    const phone = [sources.device, sources.app].filter(Boolean);
+    if (phone.length) sources.phone = phone.includes('network') ? 'network' : phone[0];
+    for (const end of load.ends) {
+      const install = INSTALLS[end.name];
+      if (end.picked && install && install.wait && load.at[install.wait] === undefined) {
+        downloads.push({ what: install.wait, bytes: end.picked.bytes, ms: null, from: 'file' });
+      }
+    }
+    // A step that waited for a file to be at hand.
+    const waitFor = (id, kind) => {
+      const from = sources[kind] === undefined ? null : sources[kind];
+      line.cut(id, load.at[kind], { network: travelled(from), from });
+    };
 
-    // The firmware is still to be installed when the loader said this load
-    // installs one, or (where it did not say) when one was fetched, and
-    // nothing is installed yet. Nothing after it is known then: the game may
-    // have arrived, but what is waited for is the firmware.
-    const firmwareDue = load.fwInstalled === null && load.gameInstalled === null
-      && (load.wantFirmware === true || (load.wantFirmware === null && Boolean(load.fwFetched)));
-    if (complete && load.fwFetched && (load.fwInstalled !== null || firmwareDue)) {
-      line.cut('fw-download', load.fwFetched.t, { network: travelled(fwFrom), from: fwFrom });
-    }
-    if (complete && load.fwInstalled !== null) {
-      const cut = line.cut('fw-install', load.fwInstalled);
-      Object.assign(cut.step, copied(load.fwCopied, cut));
-    }
-    if (firmwareDue) complete = false;
-    if (complete && load.gameFetched) line.cut('game-download', load.gameFetched.t, { network: travelled(gameFrom), from: gameFrom });
-    if (complete && load.gameInstalled === null) complete = false;
     if (complete) {
-      const cut = line.cut('game-install', load.gameInstalled);
-      Object.assign(cut.step, copied(load.gameCopied, cut));
+      for (const end of load.ends) {
+        const install = INSTALLS[end.name];
+        if (!install) {
+          line.cut(end.name, end.t, { named: true });
+          continue;
+        }
+        if (install.download && load.at[install.wait] !== undefined) waitFor(install.download, install.wait);
+        const cut = line.cut(install.id, end.t);
+        if (end.copied !== null) cut.step.copyMs = Math.min(Math.max(round(end.copied) - cut.begin, 0), cut.step.ms);
+      }
+    }
+    if (complete && load.gameInstalled === null) {
+      // Not installed yet. What is waited for is the firmware or the phone
+      // when the loader said this load installs one (or, where it did not
+      // say, when a firmware was fetched) and none is installed; nothing
+      // after it is known then, even if the game has arrived. The same
+      // holds while the N-Gage application that was fetched is not
+      // installed. Otherwise what is waited for is the game.
+      complete = false;
+      const ended = (name) => load.ends.some((end) => end.name === name);
+      const installed = load.ends.some((end) => INSTALLS[end.name] && INSTALLS[end.name].device);
+      const due = !installed && (load.wantFirmware === true || (load.wantFirmware === null && load.at.firmware !== undefined));
+      const application = installed && load.at.app !== undefined && !ended('app-installed');
+      const waited = due ? ['firmware', 'phone'].find((kind) => load.at[kind] !== undefined)
+        : (!application && load.at.game !== undefined ? 'game' : null);
+      if (waited) waitFor(Object.values(INSTALLS).find((install) => install.wait === waited).download, waited);
+    } else if (complete) {
       const watch = watches.find((item) => item.installed === load.gameInstalled);
       if (!watch || watch.firstFrame === null) {
         complete = false;
@@ -329,7 +390,7 @@ export function timeline({ marks = [], resources = [], navigation = null, pageRe
     downloads,
     // What travelled, and the time during which anything did.
     network: spans.length ? { bytes: spans.reduce((sum, span) => sum + span.bytes, 0), ms: round(unionLength(spans)) } : null,
-    hiddenMs: round(hiddenBetween(visibility, origin, line.cursor)),
+    hiddenMs: hiddenBetween(visibility, origin, line.cursor) === null ? null : round(hiddenBetween(visibility, origin, line.cursor)),
     kept,
   };
   if (!withPage) {
@@ -346,17 +407,30 @@ const tenths = (ms) => (Number.isFinite(ms) ? `${number(ms / 1000, 1)} s` : '–
 const speed = (bytes, ms) => (ms > 0 && bytes > 0 ? (bytes * 1000) / ms : null);
 const perSecond = (rate) => `${megabytes(rate, rate < 10485760 ? 1 : 0)} a second`;
 
-// The steps the device does by itself, as a finding names them.
-const DEVICE_STEPS = {
-  check: 'checking what the browser can do',
-  files: 'reading the emulator from the browser’s storage',
-  emulator: 'starting the emulator',
-  'fw-download': 'reading the firmware from this device',
-  'fw-install': 'installing the firmware',
-  'game-download': 'reading the game from this device',
-  'game-install': 'installing the game',
-  'first-frame': 'starting the game',
+// Every step this section knows.
+//   label  its row in the dialog
+//   work   what a finding calls it, for a step that is work of the device
+//          alone. The others are not, or not surely: `page` and `check` wait
+//          for the server too, and a step that waits for a file waits for
+//          the catalogue and for the server's word on a kept copy even when
+//          the file itself was at hand
+//   file   for a step that waits for a file: what the file is
+const STEPS = {
+  page: { label: 'Opening the page' },
+  check: { label: 'Getting ready to load the emulator' },
+  files: { label: 'Loading the emulator', work: 'reading the emulator from the browser’s cache' },
+  emulator: { label: 'Starting the emulator', work: 'starting the emulator' },
+  'fw-download': { file: 'firmware' },
+  'fw-install': { label: 'Installing the firmware', work: 'installing the firmware' },
+  'phone-download': { file: 'phone’s software' },
+  'device-install': { label: 'Installing the phone', work: 'installing the phone' },
+  'app-install': { label: 'Installing the N-Gage application', work: 'installing the N-Gage application' },
+  'game-download': { file: 'game' },
+  'game-install': { label: 'Installing the game', work: 'installing the game' },
+  'first-frame': { label: 'Starting the game, until its first picture', work: 'starting the game' },
 };
+export const STEP_IDS = Object.keys(STEPS);
+export const INSTALL_STEPS = Object.values(INSTALLS).flatMap((install) => [install.id, install.download]).filter(Boolean);
 
 export function findings(data) {
   if (!data || !data.complete || !(data.totalMs > 0)) return [];
@@ -368,31 +442,38 @@ export function findings(data) {
   const rate = data.network ? speed(data.network.bytes, data.network.ms) : null;
   if (downloading >= DOWNLOAD_MIN_MS && downloading >= DOWNLOAD_SHARE * data.totalMs && rate !== null) {
     const slow = rate < SLOW_BYTES_PER_S;
+    // Whether the next start downloads again: not when everything was
+    // stored, surely when nothing is or a file had to stay in memory, and
+    // otherwise it is not known and not said.
+    const inMemory = data.kept === false || data.downloads.some((file) => file.memory);
+    const next = inMemory ? 'The browser did not let this page keep the files (a private window does not, and neither does storage that is full), so the next start downloads them again. '
+      : data.kept === true ? 'The files are kept on this device now, so the next start does not download them again. ' : '';
     found.push({
       code: 'slow-download',
       level: slow ? 'warn' : 'info',
       title: slow ? 'The connection is slow: most of the wait was downloading' : 'Most of the wait was downloading',
       detail: `It took ${tenths(data.totalMs)} ${waited} until ${shown}, and ${tenths(downloading)} of that was waiting for downloads: `
         + `${megabytes(data.network.bytes, 1)} arrived at ${perSecond(rate)}.`,
-      advice: (data.kept === false
-        ? 'This browser window does not keep the files (a private window does not), so every start downloads them again.'
-        : 'The files are kept on this device now, so the next start does not download them again.')
-        + ' How fast the game runs once it has started does not depend on the connection.',
+      advice: `${next}How fast the game runs once it has started does not depend on the connection.`,
     });
   }
 
-  // The page was in the background for part of the wait: the browser holds a
-  // hidden page back, so the time says nothing about the device.
-  const device = data.steps.filter((step) => DEVICE_STEPS[step.id] && (step.network === false || step.network === undefined));
+  // The work of the device: the steps that are its alone, with the
+  // emulator's files only when the browser's cache had them. Not judged
+  // unless the page is known to have been on screen for all of the wait: a
+  // browser holds a hidden page back, so that time says nothing about the
+  // device.
+  const device = data.steps.filter((step) => STEPS[step.id] && STEPS[step.id].work && (step.network === false || step.network === undefined));
   const working = device.reduce((sum, step) => sum + step.ms, 0);
-  if (working >= START_SLOW_MS && !(data.hiddenMs > 0)) {
+  const limit = data.steps.some((step) => step.id === 'device-install') ? PHONE_START_SLOW_MS : START_SLOW_MS;
+  if (working >= limit && data.hiddenMs === 0) {
     const longest = device.reduce((a, b) => (b.ms > a.ms ? b : a));
     found.push({
       code: 'slow-start',
       level: 'warn',
       title: 'Starting took long on this device',
       detail: `With the files at hand, this device still needed ${tenths(working)} until ${shown}. `
-        + `The longest part was ${DEVICE_STEPS[longest.id]} (${tenths(longest.ms)}).`,
+        + `The longest part was ${STEPS[longest.id].work} (${tenths(longest.ms)}).`,
       advice: 'This is work the device does by itself, so a slow start usually comes with a slow game: see what else is found here.'
         + ' Closing other tabs and programs leaves more of the device to the game.',
     });
@@ -417,14 +498,16 @@ const state = {
 // drawn. It goes on for as long as this is the last game installed (a game
 // paused in a hidden tab draws when the visitor comes back), slowly after
 // two minutes.
-function watchFirstFrame(page, installed) {
+function watchFirstFrame(page, installed, framesBefore) {
   const emu = page.emu;
   if (!emu || !emu.module) return;
-  // The counter before the launch. The mark is seen a moment after it was
-  // made, which is long before the launch it precedes has drawn anything.
-  let before;
+  // The counter before the launch: the mark carries it. A mark is seen a
+  // moment after it was made, and on a page that is held up the game may
+  // have drawn by then, so the count now is only what a page whose mark
+  // does not say falls back to.
+  let before = framesBefore;
   try {
-    before = emu.frames();
+    if (!Number.isFinite(before)) before = emu.frames();
   } catch {
     return; // the emulator is gone
   }
@@ -454,27 +537,20 @@ function askKept(page) {
   }, () => {});
 }
 
-const STEP_LABELS = {
-  page: 'Opening the page',
-  check: 'Checking the browser',
-  files: 'Loading the emulator',
-  emulator: 'Starting the emulator',
-  'fw-install': 'Installing the firmware',
-  'game-install': 'Installing the game',
-  'first-frame': 'Starting the game, until its first picture',
-};
 const SOURCES = {
   cache: 'already on this device',
   'browser-cache': 'from the browser’s cache',
   file: 'a file from this device',
 };
-const NAMES = { firmware: 'Firmware', game: 'Game' };
+const NAMES = { firmware: 'Firmware', device: 'Phone software', app: 'N-Gage application', game: 'Game' };
 
 function stepRow(step) {
-  let label = STEP_LABELS[step.id];
+  // A step this section has no words for is shown under its mark's name.
+  const known = STEPS[step.id] || {};
+  let label = known.label || step.id;
   let note = null;
-  if (step.id === 'fw-download' || step.id === 'game-download') {
-    const what = step.id === 'fw-download' ? 'firmware' : 'game';
+  if (known.file) {
+    const what = known.file;
     // A file that was there before it was needed is not worth a row.
     if (step.ms < 50) return null;
     label = step.network === true ? `Waiting for the ${what} to download` : `Fetching the ${what}`;
@@ -494,7 +570,7 @@ function stepRow(step) {
 }
 
 function downloadRow(file) {
-  const label = file.what === 'player' ? `Emulator, ${file.file}` : NAMES[file.what];
+  const label = file.what === 'player' ? `Emulator, ${file.file}` : NAMES[file.what] || file.what;
   const size = file.bytes ? megabytes(file.bytes, 1) : null;
   if (file.from === 'network') {
     const rate = speed(file.bytes, file.ms);
@@ -510,6 +586,7 @@ export default {
 
   init(ctx) {
     state.pageReady = performance.now();
+    // The page is taken to have been opened in the state it is in now.
     state.visibility = [{ t: 0, hidden: document.hidden }];
     document.addEventListener('visibilitychange', () => {
       state.visibility.push({ t: performance.now(), hidden: document.hidden });
@@ -521,7 +598,7 @@ export default {
     try {
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          if (entry.name === `${PREFIX}game-installed`) watchFirstFrame(ctx.page, entry.startTime);
+          if (entry.name === `${PREFIX}game-installed`) watchFirstFrame(ctx.page, entry.startTime, entry.detail ? entry.detail.frames : null);
         }
       }).observe({ type: 'mark' });
     } catch (error) {
@@ -585,7 +662,7 @@ export default {
         label: 'The player itself',
         value: `${data.player.complete ? 'started' : 'has been starting'} in ${tenths(data.player.totalMs)} when the page was opened`,
         note: data.player.steps.map((step, index) => {
-          const label = STEP_LABELS[step.id];
+          const label = STEPS[step.id].label;
           return `${index ? label[0].toLowerCase() + label.slice(1) : label} ${tenths(step.ms)}`;
         }).join(', ') + '.',
       }]));

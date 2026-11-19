@@ -267,6 +267,7 @@ async function preparePhone(load) {
       showStep('Installing the N-Gage application…');
       await installFile(phone.app, 'ngage.sis', (path) => page.emu.call('POST', '/v1/apps', { path, type: 'sis' }));
       page.phone.app = true;
+      performance.mark('eka2l1:app-installed');
     }
   }
   load.installed('app');
@@ -286,7 +287,7 @@ async function installPhoneGame(source, expected) {
   const uid = expected && expected.uid ? String(expected.uid).toLowerCase() : null;
   const app = (installed.added || []).find((item) => String(item.uid).toLowerCase() === uid) || (installed.added || [])[0];
   if (!app) throw new Error('No game was found in the N-Gage 2.0 file');
-  performance.mark('eka2l1:game-installed');
+  performance.mark('eka2l1:game-installed', { detail: { frames: page.emu.frames() } }); // the count before the game draws, for diag/startup.js
   progress.load = null; // from here the status line belongs to the game
   await launch(app);
 }
@@ -319,7 +320,7 @@ async function installAndLaunch(source, name, expected = null) {
   const app = apps.find((item) => String(item.uid).toLowerCase() === uid) || apps[0];
   if (!app) throw new Error('No game was found on the card dump');
 
-  performance.mark('eka2l1:game-installed');
+  performance.mark('eka2l1:game-installed', { detail: { frames: page.emu.frames() } }); // the count before the game draws, for diag/startup.js
   progress.load = null; // from here the status line belongs to the game
   await launch(app);
 }

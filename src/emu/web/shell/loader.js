@@ -463,10 +463,11 @@ export class Downloads {
 // when a file is at hand, which says where its bytes came from ('cache': kept
 // here from an earlier visit; 'network'), how many there are, when the page
 // began to fetch it, and whether the server was asked if a kept copy is still
-// current. `url` is what was requested, so that the section can find the
-// browser's own record of the request; it never leaves the page.
+// current, and whether it is held in memory only because storage was full.
+// `url` is what was requested, so that the section can find the browser's own
+// record of the request; it never leaves the page.
 function markFetched(name, task, source) {
-  performance.mark(name, { detail: { from: task.from, bytes: task.loaded, began: task.began, asked: Boolean(task.asked), url: source.key } });
+  performance.mark(name, { detail: { from: task.from, bytes: task.loaded, began: task.began, asked: Boolean(task.asked), memory: Boolean(task.memory), url: source.key } });
 }
 
 const validHash = (hash) => (hash && Number(hash.bytes) > 0 && /^[0-9a-f]{64}$/i.test(String(hash.sha256)) ? hash : null);
@@ -479,6 +480,7 @@ async function fetchAsset(store, asset, task, report, signal, keep, overflow = f
   const target = checkedUrl(asset.url, asset.label);
   const expect = validHash(asset.expect);
   target.hash = '';
+  if (overflow) task.memory = true;
 
   // A file whose content is known is asked for by a URL that names the
   // content. The assets Worker may then cache it for good, and so do we.
@@ -529,11 +531,11 @@ async function fetchAsset(store, asset, task, report, signal, keep, overflow = f
         if (known.etag) current = head.headers.get('ETag') === known.etag;
         else current = Boolean(known.modified) && head.headers.get('Last-Modified') === known.modified;
         if (current) downloads.touch(key, 'checked');
+        task.asked = true;
       }
     } catch (error) {
       if (signal.aborted) throw error;
     }
-    task.asked = true;
     if (current) return fromCache();
   }
 
@@ -756,8 +758,9 @@ export function beginLoad(wanted, { downloads, onProgress = () => {}, firmware: 
     const one = async (kind, label, url, expect) => {
       if (!url) return null;
       if (validHash(expect)) verify[kind] = expect.sha256;
-      tasks[kind] = { label, from: null, loaded: 0, total: 0, done: false };
+      tasks[kind] = { label, from: null, loaded: 0, total: 0, done: false, began: performance.now() };
       sources[kind] = await fetchAsset(downloads, { kind, label, url, expect }, tasks[kind], report, controller.signal, keep);
+      markFetched(`eka2l1:${kind}-fetched`, tasks[kind], sources[kind]);
       return sources[kind];
     };
     const [device, app] = await Promise.all([

@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import startup, { findings, fromBrowserCache, hiddenBetween, splitLoads, timeline } from '../shell/diag/startup.js';
+import startup, { INSTALL_STEPS, STEP_IDS, findings, fromBrowserCache, hiddenBetween, splitLoads, timeline } from '../shell/diag/startup.js';
 
 const MB = 1048576;
 const mark = (name, t, detail = null) => ({ name, t, detail });
@@ -120,8 +120,11 @@ test('a slow connection: the wait for the downloads is its own step, and found',
   assert.match(found[0].detail, /42\.6 MB arrived at 0\.7 MB a second/);
   assert.match(found[0].advice, /kept on this device/);
 
-  // Where nothing is kept, the advice does not promise a faster next start.
-  assert.match(findings({ ...data, kept: false })[0].advice, /every start downloads them again/);
+  // Where nothing is kept, or a file had to stay in memory, the advice does
+  // not promise a faster next start; where it is not known, it says nothing.
+  assert.match(findings({ ...data, kept: false })[0].advice, /the next start downloads them again/);
+  assert.match(findings({ ...data, downloads: [...data.downloads, { what: 'game', bytes: 1, ms: 1, from: 'network', memory: true }] })[0].advice, /the next start downloads them again/);
+  assert.equal(findings({ ...data, kept: null })[0].advice, 'How fast the game runs once it has started does not depend on the connection.');
 });
 
 test('a fast connection with a large game: found, as information', () => {
@@ -145,7 +148,7 @@ test('a slow device: found, with the step that took longest', () => {
   const found = findings(data);
   assert.deepEqual(found.map((finding) => finding.code), ['slow-start']);
   assert.equal(found[0].level, 'warn');
-  assert.match(found[0].detail, /needed 31\.2 s until the game showed/); // everything but the page
+  assert.match(found[0].detail, /needed 30\.4 s until the game showed/); // the emulator, the installs, the first picture
   assert.match(found[0].detail, /The longest part was starting the emulator \(8\.8 s\)/);
   assert.equal(step(data, 'first-frame').launchMs, 2400);
 
@@ -155,6 +158,10 @@ test('a slow device: found, with the step that took longest', () => {
   const hidden = timeline(input);
   assert.equal(hidden.hiddenMs, 4000);
   assert.deepEqual(findings(hidden), []);
+  // And so do they when it is not known where the page was.
+  const unknown = timeline({ ...input, visibility: [{ t: 9000, hidden: false }] });
+  assert.equal(unknown.hiddenMs, null);
+  assert.deepEqual(findings(unknown), []);
 });
 
 test('nothing is found while a load is not finished', () => {
@@ -266,15 +273,103 @@ test('splitLoads: the last load is the one the timeline is of', () => {
     mark('game-fetched', 20000, { from: 'cache', bytes: 3, began: 19990 }), mark('game-installed', 20200),
     mark('game-fetched', 30000, { from: 'cache', bytes: 4, began: 29990 }), mark('game-installed', 30200),
   ]);
-  assert.deepEqual(loads.map((load) => [load.began, load.wantFirmware, load.gameInstalled, load.gameFetched && load.gameFetched.bytes]),
+  const game = (load) => load.files.find((file) => file.kind === 'game');
+  assert.deepEqual(loads.map((load) => [load.began, load.wantFirmware, load.gameInstalled, game(load) ? game(load).bytes : null]),
     [[50, true, 400, 1], [9000, false, 9300, 2], [12000, null, null, null], [15000, false, 20200, 3], [30000, null, 30200, 4]]);
-  assert.equal(loads[0].fwInstalled, 300);
+  assert.deepEqual(loads[0].ends.map((end) => [end.name, end.t]), [['firmware-installed', 300], ['game-installed', 400]]);
+  assert.deepEqual(loads[0].at, { firmware: 100, game: 110 });
   assert.equal(loads[0].launched, 450);
-  assert.equal(loads[1].fwFetched, null);
+  assert.deepEqual(loads[1].at, { game: 9100 });
   // Marks from a page without the loader's begin and without details are still times.
   const bare = splitLoads([mark('game-fetched', 5)])[0];
   assert.equal(bare.began, null);
-  assert.deepEqual(bare.gameFetched, { t: 5, from: null, bytes: null, began: null, asked: false, url: null });
+  assert.deepEqual(bare.at, { game: 5 });
+  assert.deepEqual(bare.files, []);
+});
+
+// An N-Gage 2.0 game: the phone's device zip and the N-Gage application
+// instead of a firmware, and the application installed after the phone.
+function phoneStart() {
+  const fetched = (from, bytes, began, url) => ({ from, bytes, began, asked: false, url });
+  return {
+    marks: [
+      mark('fetch-begin', 205, { firmware: true }),
+      mark('game-fetched', 1500, fetched('network', 12 * MB, 400, GAME)),
+      ...BOOT,
+      mark('app-fetched', 3000, fetched('network', 30 * MB, 410, 'https://site/assets/ngage2/app.sis?v=3')),
+      mark('device-fetched', 9000, fetched('network', 80 * MB, 405, 'https://site/assets/devices/rm-409.zip?v=4')),
+      mark('phone-fetched', 9010),
+      mark('uploaded:device.zip', 9500), mark('device-installed', 14000),
+      mark('uploaded:ngage.sis', 14200), mark('app-installed', 20000),
+      mark('uploaded:a.n-gage', 20300), mark('game-installed', 21000), mark('launched', 21500),
+    ].sort((a, b) => a.t - b.t),
+    resources: PLAYER,
+    pageReady: 200,
+    watches: [{ installed: 21000, firstFrame: 30000 }],
+    visibility: [{ t: 0, hidden: false }],
+    kept: true,
+  };
+}
+
+test('an N-Gage 2.0 game: the phone and the application are steps of their own', () => {
+  const data = timeline(phoneStart());
+  assert.equal(data.complete, true);
+  assert.equal(data.totalMs, 30000);
+  assert.equal(sum(data.steps), 30000);
+  assert.deepEqual(data.steps.map((item) => [item.id, item.ms]), [
+    ['page', 200], ['check', 100], ['files', 600], ['emulator', 1100], ['phone-download', 7010], ['device-install', 4990],
+    ['app-install', 6000], ['game-download', 0], ['game-install', 1000], ['first-frame', 9000],
+  ]);
+  assert.equal(step(data, 'phone-download').network, true);
+  assert.equal(step(data, 'device-install').copyMs, 490);
+  assert.equal(step(data, 'app-install').copyMs, 200);
+  assert.deepEqual(data.downloads.slice(3).map((file) => [file.what, file.from, file.ms]),
+    [['game', 'network', 1100], ['app', 'network', 2590], ['device', 'network', 8595]]);
+  // No firmware step exists for it, and none is made up.
+  assert.equal(step(data, 'fw-install'), undefined);
+  // 22.1 s of work for the device: long for an original N-Gage game, not
+  // for a phone, which has its own bound.
+  assert.deepEqual(findings(data), []);
+  const twice = phoneStart();
+  twice.marks = twice.marks.map((item) => ({ ...item, t: item.t * 2, detail: item.detail && item.detail.began ? { ...item.detail, began: item.detail.began * 2 } : item.detail }));
+  twice.resources = twice.resources.map((entry) => ({ ...entry, start: entry.start * 2, end: entry.end * 2 }));
+  twice.pageReady *= 2;
+  twice.watches = [{ installed: 42000, firstFrame: 60000 }];
+  const found = findings(timeline(twice));
+  assert.deepEqual(found.map((finding) => finding.code), ['slow-start']);
+  assert.match(found[0].detail, /needed 44\.2 s/);
+  assert.match(found[0].detail, /The longest part was starting the game \(18\.0 s\)/);
+
+  // While the phone is still on its way, the game that has arrived is not what is waited for.
+  const input = phoneStart();
+  input.marks = input.marks.filter((item) => item.t < 5000);
+  input.watches = [];
+  const waiting = timeline(input);
+  assert.equal(waiting.complete, false);
+  assert.deepEqual(waiting.steps.map((item) => item.id), ['page', 'check', 'files', 'emulator']);
+  assert.deepEqual(waiting.downloads.slice(3).map((file) => file.what), ['game', 'app']);
+
+  // The phone is there and being installed.
+  input.marks = phoneStart().marks.filter((item) => item.t < 12000);
+  assert.deepEqual(timeline(input).steps.map((item) => [item.id, item.ms]).slice(4), [['phone-download', 7010]]);
+
+  // The phone is installed and the application is being installed: the
+  // game, which arrived long ago, is not what is waited for.
+  input.marks = phoneStart().marks.filter((item) => item.t < 18000);
+  assert.deepEqual(timeline(input).steps.map((item) => [item.id, item.ms]).slice(4), [['phone-download', 7010], ['device-install', 4990]]);
+});
+
+test('a mark this section does not know is a step under its own name', () => {
+  const input = firstVisit();
+  input.marks = [...input.marks, mark('patches-applied', 2800)].sort((a, b) => a.t - b.t);
+  const data = timeline(input);
+  assert.deepEqual(data.steps.map((item) => [item.id, item.ms]).slice(4), [
+    ['fw-download', 0], ['fw-install', 600], ['patches-applied', 200], ['game-download', 0], ['game-install', 200], ['first-frame', 1100]]);
+  assert.equal(step(data, 'patches-applied').named, true);
+  assert.equal(sum(data.steps), data.totalMs);
+  // Marks outside a load are not its steps.
+  const outside = timeline({ ...firstVisit(), marks: [mark('something', 100), ...firstVisit().marks, mark('later', 3500)] });
+  assert.deepEqual(outside.steps.map((item) => item.id), timeline(firstVisit()).steps.map((item) => item.id));
 });
 
 test('a game named in the page address is a load from the start', () => {
@@ -316,7 +411,7 @@ test('what is not known to be a download or not is blamed on neither side', () =
   // first picture are the device's; the 7.2 s of files are not counted.
   const found = findings(data);
   assert.deepEqual(found.map((finding) => finding.code), ['slow-start']);
-  assert.match(found[0].detail, /needed 39\.6 s/);
+  assert.match(found[0].detail, /needed 38\.4 s/);
 
   // Without any record of the emulator's files, its start includes their
   // download: a long one is not called a slow device.
@@ -329,7 +424,36 @@ test('hiddenBetween: only what falls into the wait', () => {
   const changes = [{ t: 0, hidden: true }, { t: 1000, hidden: false }, { t: 5000, hidden: true }];
   assert.equal(hiddenBetween(changes, 0, 4000), 1000);
   assert.equal(hiddenBetween(changes, 500, 6000), 1500);
-  assert.equal(hiddenBetween([], 0, 1000), 0);
+  // Nothing is known without a history, or before its first entry.
+  assert.equal(hiddenBetween([], 0, 1000), null);
+  assert.equal(hiddenBetween(changes.slice(1), 500, 6000), null);
+  assert.equal(hiddenBetween(changes.slice(1), 1000, 6000), 1000);
+});
+
+test('a wait for a kept file is not the device’s work', () => {
+  // A second visit on a bad connection: the files are kept, but the
+  // catalogue that names them answers after 16 seconds.
+  const input = firstVisit();
+  const shift = (item) => (item.t > 2000 ? item.t + 16000 : item.t);
+  input.marks = input.marks.map((item) => (item.name.endsWith('-fetched') ? { ...item, t: 18000, detail: { ...item.detail, from: 'cache' } } : { ...item, t: shift(item) }))
+    .sort((a, b) => a.t - b.t);
+  input.resources = PLAYER.map((entry) => ({ ...entry, transfer: 0 }));
+  input.watches = [{ installed: 19000, firstFrame: 20100 }];
+  const data = timeline(input);
+  assert.equal(step(data, 'fw-download').ms, 16000);
+  assert.equal(step(data, 'fw-download').network, false);
+  assert.deepEqual(findings(data), []);
+});
+
+test('a click that came to nothing leaves the timeline as it was', () => {
+  const before = timeline(firstVisit());
+  const after = timeline({ ...firstVisit(), marks: [...firstVisit().marks, mark('load-begin', 50000), mark('load-begin', 60000)] });
+  assert.deepEqual(after, before);
+});
+
+test('every step an install makes has its words', () => {
+  for (const id of INSTALL_STEPS) assert.ok(STEP_IDS.includes(id), id);
+  assert.ok(STEP_IDS.includes('first-frame'));
 });
 
 test('the section: nothing to say before the page has started it', () => {
