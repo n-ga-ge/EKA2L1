@@ -57,11 +57,12 @@ export const LIMITS = {
   phone: 50,
   // ... and below which a game the device sets the pace of runs clearly
   // slower than a fast computer runs it: a warning, not a fault. The
-  // reference laptop interprets 134 to 139 million a second in Shadowkey, 102
-  // pinned to one core and 90 to 92 with the machine busy (nothing is said
-  // there); under a quota of half a core it does 57 and Shadowkey draws half
-  // its frames.
-  fast: 80,
+  // reference laptop interprets 134 to 151 million a second in Shadowkey.
+  // Under a quota of 60% of a core it does 87 and Shadowkey draws 13 frames
+  // a second for 18, under half a core 57 and half the frames; with the
+  // machine busy with other work it did 90 to 92, which holds a game back as
+  // well. Pinned to one core it does 102, and nothing is said.
+  fast: 100,
   // The refreshes a second the emulator's frame limit stands for when it is
   // not known, and when it is switched off (the emulator then uses 240).
   refresh: 60,

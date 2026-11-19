@@ -32,7 +32,7 @@ import { el, number, percent, rows, seconds } from './dom.js';
 // the test's `mips`, the speed over its whole two seconds, in the fastest of
 // many runs. docs/diagnostics.md ("This device") says how they were measured
 // and how to measure them again.
-export const REFERENCE_MIPS = { wasm: 660, js: 365 };
+export const REFERENCE_MIPS = { wasm: 830, js: 460 };
 
 // The emulator's threads that work while a game is played: the one that runs
 // the game, the one that draws, the sound mixer, and the page's own.
@@ -46,9 +46,9 @@ export const GAME_NEEDS = 0.4;
 
 // device-slow: below `bad` the device is slower than the phone and a
 // demanding game cannot keep its pace. Below `warn` such a game runs, clearly
-// slower than on a fast computer: the speed section warns below 80 million a
-// second (LIMITS.fast there), 0.6 of the reference.
-export const SLOW = { warn: 0.6, bad: GAME_NEEDS };
+// slower than on a fast computer: the speed section warns below 100 million a
+// second (LIMITS.fast there), 0.7 of the reference.
+export const SLOW = { warn: 0.7, bad: GAME_NEEDS };
 
 // main-thread-stalls: in the last two minutes of play that were watched, the
 // page's thread was held up at least `count` times and for at least `share`

@@ -347,9 +347,9 @@ test('findings: the emulator\'s own work is not the interpreter\'s speed', () =>
   // Half of the time goes into the emulator's work for the guest (a picture
   // drawn in software, say), and few instructions are run per second of the
   // clock, but the code itself runs fast: that is not this section's finding.
-  const data = measure(stretch(30, { idle: 0.05, own: 0.5, mips: 100, frames: 8, fired: 280 }));
-  close(data.mips, 45);
-  close(data.mipsCode, 100);
+  const data = measure(stretch(30, { idle: 0.05, own: 0.5, mips: 130, frames: 8, fired: 280 }));
+  close(data.mips, 58.5);
+  close(data.mipsCode, 130);
   close(data.own, 0.5);
   assert.equal(pace(data), 'device');
   assert.deepEqual(codes(data), []);
