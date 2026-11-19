@@ -5,6 +5,12 @@
 #include <algorithm>
 #include <common/bytes.h>
 #include <common/log.h>
+#include <common/platform.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/speed.h>
+#endif
+
 #include <cpu/dyncom/arm_dyncom.h>
 #include <cpu/dyncom/armstate.h>
 #include <cpu/dyncom/vfp/vfp.h>
@@ -183,16 +189,25 @@ void ARMul_State::ResetMPCoreCP15Registers() {
 }
 
 void ARMul_State::RaiseException(const int type, const std::uint32_t data) {
+#if EKA2L1_PLATFORM(WEB)
+    const eka2l1::webdiag::speed_call_scope timed;
+#endif
     core->exception_handler(static_cast<eka2l1::arm::exception_type>(type), data);
 }
 
 void ARMul_State::RaiseHook(const std::uint32_t addr) {
     if (core->hook_handler) {
+#if EKA2L1_PLATFORM(WEB)
+        const eka2l1::webdiag::speed_call_scope timed;
+#endif
         core->hook_handler(addr);
     }
 }
 
 void ARMul_State::RaiseSystemCall(std::uint32_t val) {
+#if EKA2L1_PLATFORM(WEB)
+    const eka2l1::webdiag::speed_call_scope timed;
+#endif
     core->system_call_handler(val);
 }
 

@@ -23,6 +23,11 @@
 #include <cpu/dyncom/arm_dyncom_trans.h>
 
 #include <common/log.h>
+#include <common/platform.h>
+
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/speed.h>
+#endif
 
 namespace eka2l1::arm {
     dyncom_core::dyncom_core(arm::exclusive_monitor *monitor, const std::size_t page_bits)
@@ -45,6 +50,9 @@ namespace eka2l1::arm {
         state_->NumInstrsToExecute = instruction_count;
 
         InterpreterMainLoop(state_.get(), ticks_executed_);
+#if EKA2L1_PLATFORM(WEB)
+        webdiag::speed.cache_bytes.store(state_->trans_cache_buf_top, std::memory_order_relaxed);
+#endif
     }
 
     void dyncom_core::stop() {
@@ -170,6 +178,9 @@ namespace eka2l1::arm {
     }
 
     void dyncom_core::clear_instruction_cache() {
+#if EKA2L1_PLATFORM(WEB)
+        webdiag::speed.cache_clears.fetch_add(1, std::memory_order_relaxed);
+#endif
         state_->instruction_cache.clear();
         state_->trans_cache_buf_top = 0;
         state_->flush_block_l1_cache();
