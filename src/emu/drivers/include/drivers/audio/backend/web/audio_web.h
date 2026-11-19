@@ -24,7 +24,8 @@ namespace eka2l1::drivers {
     // What web_audio_ring::layout holds: a mark in the upper half and the
     // number of times fields were appended in the lower. A page can meet an
     // older build (the dev server lays page sources over any build), where a
-    // pointer is in that place; the mark is a value no pointer has.
+    // pointer is in that place; the mark is a value no pointer has (the
+    // module's memory ends at 2 GB).
     inline constexpr std::uint32_t WEB_AUDIO_RING_LAYOUT = 0xE2A10001;
 
     // Single-producer / single-consumer ring of interleaved stereo float frames.

@@ -274,8 +274,6 @@ export class Eka2l1 {
     const ring = this.module._eka2l1_web_audio_ring();
     if (!ring) return;
 
-    // Why sound could not be started, for the diagnostics (diag/audio.js).
-    this.audioError = null;
     let context = null;
     try {
       context = new AudioContext({ latencyHint: 'interactive' });
@@ -291,11 +289,13 @@ export class Eka2l1 {
       });
       node.connect(context.destination);
     } catch (error) {
+      // Why sound could not be started, for the diagnostics (diag/audio.js).
       this.audioError = String(error && error.message ? error.message : error);
       if (context) context.close().catch(() => {});
       throw error;
     }
 
+    this.audioError = null;
     this.audio = context;
     await context.resume();
   }

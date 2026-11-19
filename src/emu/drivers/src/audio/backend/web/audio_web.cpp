@@ -105,7 +105,7 @@ namespace eka2l1::drivers {
         std::uint32_t playing = 0;
         for (web_audio_output_stream *stream : snapshot) {
             if (std::find(streams_.begin(), streams_.end(), stream) != streams_.end()) {
-                playing += stream->playing_.load(std::memory_order_relaxed) ? 1 : 0;
+                playing += (stream->playing_.load(std::memory_order_relaxed) && !stream->pausing_.load(std::memory_order_relaxed)) ? 1 : 0;
                 stream->render(out, frames, ring_.sample_rate, master);
             }
         }

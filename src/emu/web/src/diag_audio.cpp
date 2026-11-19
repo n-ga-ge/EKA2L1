@@ -36,7 +36,8 @@
 //     busyMs          time spent mixing
 //     slow            turns in which mixing took lateAfterMs or longer: the
 //                     mixer was held up inside the emulator (a stream's
-//                     source, the stream lock), which is no late wakeup
+//                     source, which for an MP3 stream decodes there, or the
+//                     stream lock), which is no late wakeup
 //   worklet         what the page's worklet counted into the ring:
 //     blocks          blocks the browser asked it for
 //     underruns       blocks it could not fill while `sounding` was set

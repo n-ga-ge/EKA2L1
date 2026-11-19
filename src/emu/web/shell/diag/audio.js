@@ -31,10 +31,11 @@ const GAPS_WARN = 2;
 const GAPS_BAD = 20;
 const MISSING_BAD = 0.02;
 // The mixer: wakeups a minute that came so late that everything it had
-// queued was played meanwhile (each is a gap when sound was on), and the
-// share of all wakeups that were late at all.
+// queued could be played meanwhile, and the share of all wakeups that were
+// late at all. On a quiet machine both are zero; with a third of the
+// processor the emulator needs they were 100 a minute and 5%.
 const STALLS_WARN = 4;
-const LATE_SHARE_WARN = 0.05;
+const LATE_SHARE_WARN = 0.02;
 
 const part = (sample) => (sample && sample.diag && sample.diag.audio) || null;
 const playing = (sample) => {
@@ -66,11 +67,21 @@ export function outputState({ supported, error, contextState, muted, paused }) {
   return muted ? 'muted' : paused ? 'paused' : 'suspended';
 }
 
-// How bad the gaps of a measurement are: null, 'warn' or 'bad'.
+// How bad the gaps of a measurement are: null, 'warn' or 'bad'. One gap is
+// nothing unless it was a long one.
 export function gapLevel(measured) {
-  if (!measured || !(measured.measuredS >= MIN_MEASURED_S) || !(measured.gaps >= GAPS_WARN)) return null;
-  return measured.gapsPerMinute >= GAPS_BAD || measured.missingShare >= MISSING_BAD ? 'bad' : 'warn';
+  if (!measured || !(measured.measuredS >= MIN_MEASURED_S) || !(measured.gaps >= 1)) return null;
+  if (measured.gapsPerMinute >= GAPS_BAD || measured.missingShare >= MISSING_BAD) return 'bad';
+  return measured.gaps >= GAPS_WARN ? 'warn' : null;
 }
+
+// Whether the worklet stopped: the output runs and nothing asks the ring for
+// sound. A block is 128 frames, so a running one takes hundreds a second.
+export function workletStopped(measured) {
+  return Boolean(measured) && measured.measuredS >= MIN_MEASURED_S && measured.blocks === 0;
+}
+
+const times = (count) => (count === 1 ? 'once' : `${count} times`);
 
 // Whether the machine kept the mixer waiting often enough to matter.
 function starved(mixer) {
@@ -91,8 +102,13 @@ export function measure(samples) {
   const b = samples[last];
   const before = part(a);
   const after = part(b);
-  const seconds = (b.t - a.t) / 1000;
-  if (!(seconds > 0)) return null;
+  // The page's clock is read after the emulator has answered, which on a
+  // starved machine is a while after it read its counters: the counters go
+  // by the emulator's own clock, the context's clock by the page's.
+  const pageSeconds = (b.t - a.t) / 1000;
+  const emulatorSeconds = (b.diag.uptimeMs - a.diag.uptimeMs) / 1000;
+  const seconds = emulatorSeconds > 0 ? emulatorSeconds : pageSeconds;
+  if (!(seconds > 0) || !(pageSeconds > 0)) return null;
 
   const gaps = wrapped(before.worklet.gaps, after.worklet.gaps);
   const missingFrames = wrapped(before.worklet.underrunFrames, after.worklet.underrunFrames);
@@ -103,9 +119,11 @@ export function measure(samples) {
     gapsPerMinute: perMinute(gaps, seconds),
     missingMs: rounded(missingMs, 0),
     missingShare: missingMs === null ? null : rounded(missingMs / (seconds * 1000), 4),
+    // Blocks the browser asked the worklet for. None means the worklet died.
+    blocks: wrapped(before.worklet.blocks, after.worklet.blocks),
     // How much of the time the browser asked for sound: 1 when its output
     // ran all the time, less when the output itself stood still.
-    outputShare: rounded((b.x.audio.time - a.x.audio.time) / seconds, 3),
+    outputShare: rounded((b.x.audio.time - a.x.audio.time) / pageSeconds, 3),
     mixer: null,
   };
 
@@ -127,7 +145,9 @@ export function measure(samples) {
       // How late a late wakeup was on average.
       lateByMs: late ? rounded(lateMs / late, 0) : null,
       busyShare: busyMs === null ? null : rounded(busyMs / (seconds * 1000), 4),
-      // Turns in which mixing itself took too long: the emulator's doing.
+      // Turns in which mixing itself took too long. More of them than late
+      // wakeups is the emulator's doing; a machine that holds the thread up
+      // mostly catches it asleep, and now and then in the middle of a mix.
       slow: grown(m0.slow, m1.slow),
     };
   }
@@ -228,9 +248,21 @@ export default {
     if (!measured || !(measured.measuredS >= MIN_MEASURED_S)) return found;
     const over = `the last ${Math.round(measured.measuredS)} seconds`;
     const mixer = measured.mixer;
+
+    if (workletStopped(measured)) {
+      found.push({
+        code: 'audio-unavailable',
+        level: 'warn',
+        title: 'Sound has stopped',
+        detail: `The browser's sound output is running, but the player has given it nothing for ${over}.`,
+        advice: 'Reload the page. If it happens again, please send us this report.',
+      });
+      return found;
+    }
+
     // The machine is named only when sound suffered from it: late wakeups
     // that the ring's reserve covered are nobody's trouble.
-    const machine = starved(mixer) && (measured.gaps > 0 || mixer.dry > 0);
+    const machine = starved(mixer) && measured.gaps > 0;
     const level = gapLevel(measured);
 
     if (level) {
@@ -238,10 +270,11 @@ export default {
         code: 'audio-underruns',
         level,
         title: level === 'bad' ? 'Sound keeps breaking up' : 'Sound has gaps',
-        detail: `Sound broke off ${measured.gaps} times in ${over} (${number(measured.gapsPerMinute, 0)} times a minute)`
+        detail: `Sound broke off ${times(measured.gaps)} in ${over}`
+          + `${measured.gaps > 1 ? ` (${number(measured.gapsPerMinute, 0)} times a minute)` : ''}`
           + `${Number.isFinite(measured.missingMs) ? `, and ${number(measured.missingMs, 0)} ms of it were lost` : ''}.`,
         advice: machine ? 'The device was too busy to keep the sound going: see the next point.'
-          : mixer && mixer.slow > 0 ? 'The emulator itself took too long to prepare the sound, which closing other programs will not cure. Please send us this report.'
+          : mixer && mixer.slow > mixer.late ? 'The emulator itself took too long to prepare the sound. Please send us this report.'
             : 'Close other tabs and programs, above all those that play sound or video. Wireless headphones and speakers can add gaps of their own: try the device\'s own speaker.',
       });
     }
@@ -251,9 +284,9 @@ export default {
         code: 'mixer-starved',
         level: 'warn',
         title: 'The device is too busy to keep the sound going',
-        detail: `The part of the emulator that prepares the sound was kept waiting ${mixer.late} times in ${over}`
+        detail: `The part of the emulator that prepares the sound was kept waiting ${times(mixer.late)} in ${over}`
           + `${Number.isFinite(mixer.lateByMs) ? `, by ${number(mixer.lateByMs, 0)} ms on average` : ''}`
-          + `${mixer.stalled ? `, and ${mixer.stalled} times for longer than the sound it had ready lasts` : ''}.`
+          + `${mixer.stalled ? `, and ${times(mixer.stalled)} for longer than the sound it had ready lasts` : ''}.`
           + ' That is the device, not the game.',
         advice: 'Close other programs and tabs, plug the device in and switch off its power saving mode.',
       });
@@ -276,17 +309,17 @@ export default {
     return [rows([
       {
         label: 'Output',
-        value: STATES[data.state] || data.state,
+        value: workletStopped(measured) ? 'running, but the player gives it no sound' : STATES[data.state] || data.state,
         note: output,
-        mark: data.state === 'running' ? 'ok' : ['unsupported', 'failed', 'closed'].includes(data.state) ? 'bad' : 'warn',
+        mark: workletStopped(measured) || ['unsupported', 'failed', 'closed'].includes(data.state) ? 'bad' : data.state === 'running' ? 'ok' : 'warn',
       },
       data.game && data.state === 'running' && {
         label: 'Game',
         value: !data.game.playing ? 'plays nothing' : data.game.sounding ? 'makes sound' : 'plays silence',
         note: `${data.game.playing} of ${data.game.streams} sound channels in use`
-          + `${Number.isFinite(data.queuedMs) && data.state === 'running' ? `, ${number(data.queuedMs, 0)} ms of sound ready` : ''}.`,
+          + `${Number.isFinite(data.queuedMs) ? `, ${number(data.queuedMs, 0)} ms of sound ready` : ''}.`,
       },
-      measured && {
+      measured && !workletStopped(measured) && {
         label: 'Gaps',
         value: measured.gaps ? `${measured.gaps} in ${over}` : `none in ${over}`,
         note: measured.gaps ? `${number(measured.gapsPerMinute, 0)} a minute, ${number(measured.missingMs, 0)} ms of sound lost.` : null,
@@ -294,11 +327,11 @@ export default {
       },
       mixer && {
         label: 'Sound preparation',
-        value: mixer.late ? `kept waiting ${mixer.late} times in ${over}` : `on time in ${over}`,
+        value: mixer.late ? `kept waiting ${times(mixer.late)} in ${over}` : `on time in ${over}`,
         note: `${percent(mixer.lateShare, 1)} of its turns came late`
           + `${mixer.stalled ? `, ${mixer.stalled} of them later than the sound it had ready lasts` : ''}`
           + `. It works ${percent(mixer.busyShare, 1)} of the time`
-          + `${mixer.slow ? `, and ${mixer.slow} times it took too long over it` : ''}.`,
+          + `${mixer.slow ? `, and ${times(mixer.slow)} it took too long over it` : ''}.`,
         mark: !mixer.late && !mixer.slow ? 'ok' : 'warn',
       },
       measured && measured.measuredS >= MIN_MEASURED_S && Number.isFinite(measured.outputShare) && measured.outputShare < 0.95 && {

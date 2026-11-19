@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import audio, { gapLevel, measure, outputState } from '../shell/diag/audio.js';
+import audio, { gapLevel, measure, outputState, workletStopped } from '../shell/diag/audio.js';
 import { checkedFindings } from '../shell/diag/core.js';
 
 // One sample a second, as core.js makes them. `counters` are the emulator's
@@ -21,6 +21,7 @@ function sample(second, counters = {}, output = { state: 'running', time: second
     app: 1,
     x: output ? { audio: output } : {},
     diag: {
+      uptimeMs: 5000 + second * 1000,
       audio: {
         rate: 48000,
         attached,
@@ -173,15 +174,28 @@ test('findings: a mixer that is kept waiting is the machine, when sound suffered
   assert.equal(stalled[0].level, 'warn');
   assert.match(stalled[0].detail, /20 times in the last 30 seconds, by 80 ms on average, and 5 times for longer/);
 
-  // The mixer saw the ring empty, though the worklet lost nothing.
-  const late = audio.findings(data(measure(stretch(30, { late: 600, lateMs: 12000, dry: 3 }))));
+  const late = audio.findings(data(measure(stretch(30, { late: 600, lateMs: 12000, gaps: 1 }))));
   assert.deepEqual(codes(late), ['mixer-starved']);
   assert.doesNotMatch(late[0].detail, /for longer than/);
+
+  // The mixer saw the ring empty, but the worklet lost nothing: nobody heard it.
+  assert.deepEqual(audio.findings(data(measure(stretch(30, { late: 600, lateMs: 12000, dry: 3 })))), []);
 
   // Late, but the ring's reserve covered it: nobody heard anything.
   assert.deepEqual(audio.findings(data(measure(stretch(30, { late: 600, stalled: 5, lateMs: 12000 })))), []);
   // A few late wakeups among thousands are nothing, even with a gap.
   assert.deepEqual(audio.findings(data(measure(stretch(30, { late: 20, stalled: 1, lateMs: 500, gaps: 1 })))), []);
+});
+
+test('findings: the numbers of three runs of Shadowkey on one machine', () => {
+  // As it is: nothing.
+  assert.deepEqual(audio.findings(data(measure(stretch(29)))), []);
+  // The browser held to 30% of one processor core: constant gaps, and the machine is why.
+  const third = audio.findings(data(measure(stretch(29, { gaps: 88, underrunFrames: 36720, late: 188, stalled: 50, lateMs: 8272, dry: 83, slow: 2 }))));
+  assert.deepEqual(codes(third), ['audio-underruns', 'mixer-starved']);
+  assert.equal(third[0].level, 'bad');
+  // Held to 60%: the mixer is late now and then, but the sound it keeps ready covers it.
+  assert.deepEqual(audio.findings(data(measure(stretch(29, { late: 63, stalled: 1, lateMs: 1638, slow: 1 })))), []);
 });
 
 test('findings: gaps while the mixer itself was slow are the emulator\'s, and the advice says so', () => {
@@ -191,6 +205,49 @@ test('findings: gaps while the mixer itself was slow are the emulator\'s, and th
   // Without a slow mixer and without a starved one the cause is not known.
   const unknown = audio.findings(data(measure(stretch(30, { gaps: 4, underrunFrames: 9600 }))));
   assert.match(unknown[0].advice, /Close other tabs/);
+  // A machine that holds the mixer up now and then also catches it in the
+  // middle of a mix: one slow turn among late wakeups does not blame the emulator.
+  const busy = audio.findings(data(measure(stretch(30, { gaps: 3, underrunFrames: 7200, late: 30, lateMs: 900, slow: 1 }))));
+  assert.deepEqual(codes(busy), ['audio-underruns']);
+  assert.match(busy[0].advice, /Close other tabs/);
+});
+
+test('findings: one long dropout is reported, and said to have happened once', () => {
+  const measured = measure(stretch(30, { gaps: 1, underrunFrames: 240000 }));
+  assert.equal(gapLevel(measured), 'bad');
+  const found = audio.findings(data(measured));
+  assert.deepEqual(codes(found), ['audio-underruns']);
+  assert.match(found[0].detail, /broke off once in the last 30 seconds, and 5000 ms/);
+});
+
+test('findings: an output that runs while the worklet has stopped', () => {
+  const samples = stretch(30);
+  for (const one of samples) one.diag.audio.worklet.blocks = 4000;
+  const measured = measure(samples);
+  assert.equal(measured.blocks, 0);
+  assert.equal(workletStopped(measured), true);
+  const found = audio.findings(data(measured));
+  assert.deepEqual(codes(found), ['audio-unavailable']);
+  assert.equal(found[0].title, 'Sound has stopped');
+  // Running as it should, and too little measured to say.
+  assert.equal(workletStopped(measure(stretch(30))), false);
+  assert.equal(workletStopped(measure(samples.slice(0, 5))), false);
+  assert.equal(workletStopped(null), false);
+});
+
+test('measure: the counters go by the emulator\'s clock, the output\'s clock by the page\'s', () => {
+  // The last answer came half a second late: the page's clock says 20.5 s,
+  // the emulator read its counters after 20.
+  const samples = stretch(20, { gaps: 10 });
+  samples[20].t += 500;
+  samples[20].x.audio.time = 20.5;
+  const measured = measure(samples);
+  assert.equal(measured.measuredS, 20);
+  assert.equal(measured.gapsPerMinute, 30);
+  assert.equal(measured.outputShare, 1);
+  // A build whose answer has no clock: the page's.
+  for (const one of samples) delete one.diag.uptimeMs;
+  assert.equal(measure(samples).measuredS, 20.5);
 });
 
 test('gapLevel: what the finding and the dialog\'s mark both go by', () => {
