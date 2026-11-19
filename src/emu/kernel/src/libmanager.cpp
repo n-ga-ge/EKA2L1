@@ -24,7 +24,11 @@
 #include <common/ini.h>
 #include <common/log.h>
 #include <common/path.h>
+#include <common/platform.h>
 #include <common/random.h>
+#if EKA2L1_PLATFORM(WEB)
+#include <common/webdiag/exits.h>
+#endif
 
 #include <kernel/common.h>
 #include <kernel/libmanager.h>
@@ -1398,6 +1402,9 @@ namespace eka2l1::hle {
 
         if (res == svc_funcs_.end()) {
             LOG_ERROR(KERNEL, "Unimplement system call: 0x{:X}!", svcnum);
+#if EKA2L1_PLATFORM(WEB)
+            webdiag::exits.count_unimplemented_call(svcnum);
+#endif
 
             kern_->unlock();
             return false;

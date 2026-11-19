@@ -1,5 +1,6 @@
 // Copyright (c) 2026 EKA2L1 Team.
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include <web/diag_exits.h>
 #include <web/state.h>
 
 #include <common/algorithm.h>
@@ -184,6 +185,9 @@ namespace eka2l1::web {
             register_draw_callback();
             the_sys->initialize_user_parties();
         }
+
+        // Diagnostics: how the guest's threads end.
+        exits_watch(the_sys);
 
         // Multiplayer: an N-Gage game looks at the phone's Bluetooth switch
         // before it hosts or joins.
