@@ -429,17 +429,39 @@ export function pickEngine(only) {
 }
 
 const SLICE_MS = 50;
+// A slice is at least ten of the guest's frames: the parts of a frame run at
+// different speeds, and a slice of less than a few frames can be one fast
+// part (a slice of a tenth of a frame reads up to a third too fast).
+const SLICE_STEPS = 8000000;
 
-// Runs the guest for about `ms` milliseconds, in slices of about 50, after a
-// warm-up. Returns
+// The smallest step this clock makes, in milliseconds, or Infinity when it
+// did not move while it was watched (a clock of 100 ms, as a browser gives
+// that hides the device from fingerprinting).
+export function clockGrain(now = () => performance.now()) {
+  let grain = Infinity;
+  let last = now();
+  for (let i = 0, steps = 0; i < 200000 && steps < 5; i++) {
+    const clock = now();
+    if (clock === last) continue;
+    grain = Math.min(grain, clock - last);
+    last = clock;
+    steps++;
+  }
+  return grain;
+}
+
+// Runs the guest for about `ms` milliseconds, in slices of about 50 (longer
+// on a slow device: see SLICE_STEPS), after a warm-up. Returns
 //   mips      million guest instructions a second over the whole time: what
 //             the device kept up
 //   bestMips  the same in the fastest slice: what it can do when nothing
 //             else holds it back
 //   slices, ms  how many slices were timed, and how long it took.
-// The whole-time number does not depend on a fine clock, which some browsers
-// do not give; slices too short to time on this clock are not judged.
-export function measure(engine, ms, now = () => performance.now()) {
+// The whole-time number does not need a fine clock. A slice is timed only
+// when it is long beside the clock's step (`grain`), so that a coarse clock
+// cannot make a slice look faster than it was; with no such slice the best
+// is the whole-time number.
+export function measure(engine, ms, now = () => performance.now(), grain = clockGrain(now)) {
   seed(engine.buffer());
   let steps = 200000;
   const warmFrom = now();
@@ -450,8 +472,10 @@ export function measure(engine, ms, now = () => performance.now()) {
     warmed += steps;
     clock = now();
   } while (clock - warmFrom < Math.min(300, ms / 4));
-  steps = Math.max(100000, Math.round((warmed / (clock - warmFrom)) * SLICE_MS));
+  const sliceSteps = (perMs) => Math.max(SLICE_STEPS, Math.round(perMs * SLICE_MS));
+  steps = sliceSteps(warmed / (clock - warmFrom));
 
+  const timeable = Math.max(SLICE_MS / 10, grain * 50);
   let total = 0;
   let best = 0;
   let slices = 0;
@@ -462,11 +486,13 @@ export function measure(engine, ms, now = () => performance.now()) {
     engine.run(steps);
     after = now();
     total += steps;
-    if (after - before >= SLICE_MS / 10) {
+    if (after - before >= timeable) {
       slices++;
       best = Math.max(best, steps / (after - before));
     }
     before = after;
+    // The warm-up ran slower than what follows it: keep the slices at their length.
+    if (after - from >= 2 * SLICE_MS) steps = sliceSteps(total / (after - from));
   } while (after - from < ms);
   const rate = total / (after - from); // instructions a millisecond
   const round = (perMs) => Math.round(perMs * 10) / 10000;

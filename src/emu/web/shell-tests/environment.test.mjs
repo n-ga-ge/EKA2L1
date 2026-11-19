@@ -8,16 +8,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CHECK, buildModule, checksum, jsEngine, measure, pickEngine, seed, verify, wasmEngine } from '../shell/diag/bench-worker.js';
+import { CHECK, buildModule, checksum, clockGrain, jsEngine, measure, pickEngine, seed, verify, wasmEngine } from '../shell/diag/bench-worker.js';
 import { CODES } from '../shell/diag/codes.js';
 import { checkedFindings } from '../shell/diag/core.js';
-import environment, { BUSY_THREADS, REFERENCE_MIPS, SLOW, STALLS, hiddenTime, score, stallSummary } from '../shell/diag/environment.js';
+import environment, { BUSY_THREADS, GAME_NEEDS, REFERENCE_MIPS, SLOW, STALLS, hiddenTime, score, stallSummary } from '../shell/diag/environment.js';
 
 // What collect() returns on a machine with nothing wrong, changed by `over`.
 const data = (over = {}) => ({
   cores: 8,
   busyThreads: BUSY_THREADS,
-  hidden: { now: false, windowS: 120, seconds: 0, times: 0, recentWindowS: 30, recentSeconds: 0, playingSeconds: 0 },
+  gameNeeds: GAME_NEEDS,
+  hidden: { now: false, windowS: 120, seconds: 0, times: 0, recentWindowS: 30, recentSeconds: 0, playingSeconds: 0, recentPlayingSeconds: 0 },
   stalls: { watchedS: 120, count: 0, totalMs: 0, worstMs: 0, longTasks: { count: 0, totalMs: 0, worstMs: 0 } },
   battery: { charging: true, level: 1 },
   bench: { state: 'idle' },
@@ -39,7 +40,7 @@ test('nothing wrong: nothing found, tested or not', () => {
 test('every finding is one of this section, and survives the report', () => {
   const everything = data({
     cores: 2,
-    hidden: { now: true, windowS: 120, seconds: 40, times: 2, recentWindowS: 30, recentSeconds: 12, playingSeconds: 5 },
+    hidden: { now: true, windowS: 120, seconds: 40, times: 2, recentWindowS: 30, recentSeconds: 12, playingSeconds: 5, recentPlayingSeconds: 5 },
     stalls: { watchedS: 60, count: 9, totalMs: 9000, worstMs: 2100, longTasks: { count: 4, totalMs: 3000, worstMs: 900 } },
     battery: { charging: false, level: 0.12 },
     bench: bench(0.3),
@@ -60,7 +61,8 @@ test('device-slow: by how far below the reference', () => {
   assert.deepEqual(environment.findings(data({ bench: bench(SLOW.warn) })), []);
   const warn = environment.findings(data({ bench: bench(0.6) }));
   assert.deepEqual(warn.map((finding) => [finding.code, finding.level]), [['device-slow', 'warn']]);
-  assert.match(warn[0].detail, /60%/);
+  assert.match(warn[0].detail, /reached 60% of the speed .* need about 50% to run at full speed/);
+  assert.deepEqual(environment.findings(data({ bench: bench(GAME_NEEDS) })).map((finding) => finding.level), ['warn']);
   assert.doesNotMatch(warn[0].detail, /uneven|was running/);
   assert.doesNotMatch(warn[0].advice, /battery/);
   const bad = environment.findings(data({ bench: bench(0.31) }));
@@ -72,7 +74,7 @@ test('device-slow: says what else was seen, and claims no more', () => {
   const [uneven] = environment.findings(data({ bench: bench(0.4, { bestScore: 0.9 }) }));
   assert.match(uneven.detail, /uneven, 90% at its best/);
   const [withGame] = environment.findings(data({ bench: bench(0.4, { withGame: true }) }));
-  assert.match(withGame.detail, /The game was running during the test/);
+  assert.match(withGame.detail, /A game was running during the test, which can lower the result/);
   const [onBattery] = environment.findings(data({ bench: bench(0.4), battery: { charging: false, level: 0.15 } }));
   assert.match(onBattery.advice, /connect the charger: the device runs on battery \(15%\)/);
   const [noLevel] = environment.findings(data({ bench: bench(0.4), battery: { charging: false, level: null } }));
@@ -94,7 +96,7 @@ test('main-thread-stalls: often and long enough, in enough play', () => {
   const stalls = (over) => data({ stalls: { watchedS: 100, count: 12, totalMs: 9000, worstMs: 1500, longTasks: null, ...over } });
   const found = environment.findings(stalls());
   assert.deepEqual(found.map((finding) => [finding.code, finding.level]), [['main-thread-stalls', 'warn']]);
-  assert.match(found[0].detail, /In 100 s of play it stood still 12 times, for 9\.0 s in all and 1500 ms at worst\.$/);
+  assert.match(found[0].detail, /In the last 100 s of play it stood still 12 times, for 9\.0 s in all and 1500 ms at worst\.$/);
   assert.match(environment.findings(stalls({ longTasks: { count: 5, totalMs: 4200, worstMs: 1200 } }))[0].detail, /5 ran for 50 ms or more \(4\.2 s in all\)/);
   // Too little of the time, too few, or too little play to tell.
   assert.deepEqual(environment.findings(stalls({ totalMs: STALLS.share * 100 * 1000 - 1 })), []);
@@ -104,14 +106,18 @@ test('main-thread-stalls: often and long enough, in enough play', () => {
 });
 
 test('tab-was-hidden: hidden now, or in the time the rates are measured over', () => {
-  const hidden = (over) => data({ hidden: { now: false, windowS: 120, seconds: 0, times: 0, recentWindowS: 30, recentSeconds: 0, playingSeconds: 0, ...over } });
+  const hidden = (over) => data({ hidden: { now: false, windowS: 120, seconds: 0, times: 0, recentWindowS: 30, recentSeconds: 0, playingSeconds: 0, recentPlayingSeconds: 0, ...over } });
   const now = environment.findings(hidden({ now: true }));
   assert.deepEqual(now.map((finding) => [finding.code, finding.level]), [['tab-was-hidden', 'info']]);
   assert.match(now[0].detail, /^It is hidden now\.$/);
   assert.match(environment.findings(hidden({ now: true, seconds: 50, times: 2, recentSeconds: 20 }))[0].detail, /^It is hidden now, and has been for 20 s of the last 30 s\.$/);
   const was = environment.findings(hidden({ seconds: 20, times: 1, recentSeconds: 12.4 }));
   assert.match(was[0].detail, /^It was hidden for 12 s of the last 30 s\.$/);
-  assert.match(environment.findings(hidden({ seconds: 20, times: 1, recentSeconds: 12, playingSeconds: 11 }))[0].detail, /the game went on for about 11 s/);
+  assert.match(was[0].advice, /^A game is paused while its page is hidden/);
+  // In a room with other players the game goes on: only what went on in those 30 seconds is named, and nothing is said of a pause.
+  const [wentOn] = environment.findings(hidden({ seconds: 60, times: 1, recentSeconds: 3, playingSeconds: 60, recentPlayingSeconds: 3 }));
+  assert.match(wentOn.detail, /^It was hidden for 3 s of the last 30 s, and the game went on for about 3 s of that\.$/);
+  assert.doesNotMatch(wentOn.advice, /paused/);
   // Hidden a minute ago: what is measured now is normal play again.
   assert.deepEqual(environment.findings(hidden({ seconds: 40, times: 3, recentSeconds: 0 })), []);
   assert.deepEqual(environment.findings(hidden({ seconds: 0.4, times: 1, recentSeconds: 0.4 })), []);
@@ -137,7 +143,7 @@ test('hiddenTime: the hidden part of a window, and how many times', () => {
 });
 
 test('stallSummary: only what is recent', () => {
-  const stalls = [{ t: 100, ms: 900 }, { t: 5000, ms: 150 }, { t: 6000, ms: 400 }];
+  const stalls = [{ at: 100, ms: 900 }, { at: 5000, ms: 150 }, { at: 6000, ms: 400 }];
   assert.deepEqual(stallSummary(stalls, 1000), { count: 2, totalMs: 550, worstMs: 400 });
   assert.deepEqual(stallSummary([], 0), { count: 0, totalMs: 0, worstMs: 0 });
 });
@@ -148,7 +154,7 @@ test('score: a share of the reference machine, for the engine that ran', () => {
   assert.equal(score(100, 'something else'), null);
   assert.equal(score(0, 'wasm'), null);
   assert.ok(REFERENCE_MIPS.wasm > 0 && REFERENCE_MIPS.js > 0);
-  assert.ok(SLOW.bad < SLOW.warn && SLOW.warn < 1);
+  assert.ok(SLOW.bad === GAME_NEEDS && SLOW.bad < SLOW.warn && SLOW.warn < 1);
 });
 
 test('speed test: the module is valid WebAssembly and computes what the JavaScript interpreter does', () => {
@@ -196,13 +202,29 @@ test('speed test: measure gives a speed, and a best no lower', () => {
   const engine = jsEngine();
   let clock = 0;
   const timed = { ...engine, run: (steps) => { clock += steps / 100000; return engine.run(Math.min(steps, 1000)); } };
-  const result = measure(timed, 400, () => clock);
+  const result = measure(timed, 800, () => clock, 0.005);
   assert.equal(result.mips, 100);
   assert.equal(result.bestMips, 100);
-  assert.ok(result.slices >= 7 && result.ms >= 400);
-  // A clock too coarse to time a slice: the speed over the whole time still holds.
-  clock = 0;
-  const coarse = measure(timed, 400, () => Math.floor(clock / 100) * 100);
-  assert.ok(Math.abs(coarse.mips - 100) < 30, `${coarse.mips}`);
-  assert.ok(coarse.bestMips >= coarse.mips);
+  assert.ok(result.slices >= 7 && result.ms >= 800);
+});
+
+test('speed test: a coarse clock does not make a slice look fast', () => {
+  const engine = jsEngine();
+  let clock = 0;
+  const timed = { ...engine, run: (steps) => { clock += steps / 100000; return engine.run(Math.min(steps, 1000)); } };
+  // Steps of 16.7 ms, as Firefox gives with fingerprinting protection: a
+  // slice of 50 ms can read as 33, which would be half as fast again.
+  for (const step of [16.7, 100]) {
+    clock = 0;
+    const coarse = measure(timed, 1000, () => Math.floor(clock / step) * step, step);
+    assert.ok(Math.abs(coarse.mips - 100) < 15, `${step}: ${coarse.mips}`);
+    assert.equal(coarse.bestMips, coarse.mips, `${step}`);
+    assert.equal(coarse.slices, 0);
+  }
+});
+
+test('speed test: the step of a clock', () => {
+  let calls = 0;
+  assert.equal(clockGrain(() => Math.floor(calls++ / 10) * 0.25), 0.25);
+  assert.equal(clockGrain(() => 7), Infinity); // it never moved
 });
