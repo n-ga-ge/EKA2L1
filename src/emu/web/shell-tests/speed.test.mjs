@@ -310,7 +310,16 @@ test('measure: "the last second" is the last one, or nothing', () => {
 test('findings: the speed of the interpreter decides, at the limit', () => {
   const at = (mips) => codes(measure(stretch(30, { ...SHADOWKEY, mips })));
   assert.deepEqual(at(LIMITS.phone - 1), ['cpu-bound']);
-  assert.deepEqual(at(LIMITS.phone + 1), []);
+  assert.deepEqual(at(LIMITS.fast + 1), []);
+});
+
+test('findings: faster than the phone and well behind a fast computer is a warning', () => {
+  const at = (mips) => speed.findings(measure(stretch(30, { ...SHADOWKEY, mips })));
+  assert.deepEqual(at(LIMITS.phone - 1).map((finding) => finding.level), ['bad']);
+  const between = at(LIMITS.phone + 1);
+  assert.deepEqual(between.map((finding) => `${finding.code} ${finding.level}`), ['cpu-bound warn']);
+  assert.match(between[0].detail, /51 million instructions a second/);
+  assert.deepEqual(at(LIMITS.fast - 1).map((finding) => finding.level), ['warn']);
 });
 
 test('findings: a slow interpreter is not held against a game that keeps its own pace', () => {

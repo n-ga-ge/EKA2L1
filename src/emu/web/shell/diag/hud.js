@@ -38,8 +38,10 @@
 // Everything above setupHud() is plain arithmetic and touches neither the
 // document nor the window, so a test can import this file (shell-tests/hud.test.mjs).
 
+import { measure as measureSound } from './audio.js';
 import { frameRates, span } from './core.js';
-import { el, number } from './dom.js';
+import { el, number, percent } from './dom.js';
+import { measure as measureSpeed } from './speed.js';
 
 export const WINDOW_MS = 120000; // what the rate graph spans: the samples core.js keeps
 const GRAPH_WIDTH = 172; // CSS pixels, both graphs
@@ -141,11 +143,27 @@ export function drawCost(stretch) {
 // One line each, under the graphs, for a number worth watching while playing.
 // `text(stretch)` gets the last stretch of play (core.js: span(); its samples
 // carry the emulator's counters in `diag`) and returns the line, or null when
-// the number is not known, which leaves the line out. The emulated
-// processor's load and the gaps in the sound belong here once their counters
-// exist (sample.diag.speed, sample.diag.audio; `diag` is null on a build
-// without them).
+// the number is not known, which leaves the line out: `diag` is null on a
+// build without the counters, and the sound is only judged while it plays.
 export const LINES = [
+  {
+    // How much of the time the emulated phone's processor did not wait
+    // (speed.js). Near 100% the device sets the game's pace.
+    id: 'processor',
+    text(stretch) {
+      const data = stretch.samples && stretch.samples.every((sample) => sample.diag && sample.diag.speed) ? measureSpeed(stretch.samples) : null;
+      return data && Number.isFinite(data.busy) ? `phone's processor ${percent(data.busy)} busy` : null;
+    },
+  },
+  {
+    // Gaps heard in the sound over the stretch (audio.js).
+    id: 'sound',
+    text(stretch) {
+      const data = stretch.samples ? measureSound(stretch.samples) : null;
+      if (!data || !Number.isFinite(data.gaps)) return null;
+      return data.gaps > 0 ? `sound: ${data.gaps} ${data.gaps === 1 ? 'gap' : 'gaps'}` : 'sound: no gaps';
+    },
+  },
   {
     id: 'draw',
     text(stretch) {

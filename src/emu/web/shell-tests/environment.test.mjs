@@ -59,9 +59,9 @@ test('every finding is one of this section, and survives the report', () => {
 
 test('device-slow: by how far below the reference', () => {
   assert.deepEqual(environment.findings(data({ bench: bench(SLOW.warn) })), []);
-  const warn = environment.findings(data({ bench: bench(0.6) }));
+  const warn = environment.findings(data({ bench: bench(0.5) }));
   assert.deepEqual(warn.map((finding) => [finding.code, finding.level]), [['device-slow', 'warn']]);
-  assert.match(warn[0].detail, /reached 60% of the speed .* need about 50% to run at full speed/);
+  assert.match(warn[0].detail, /reached 50% of the speed .* Below about 40% .* cannot keep their pace; between that and 60%/);
   assert.deepEqual(environment.findings(data({ bench: bench(GAME_NEEDS) })).map((finding) => finding.level), ['warn']);
   assert.doesNotMatch(warn[0].detail, /uneven|was running/);
   assert.doesNotMatch(warn[0].advice, /battery/);

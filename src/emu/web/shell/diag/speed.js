@@ -55,6 +55,13 @@ export const LIMITS = {
   // Millions of instructions per second of interpreting below which the
   // emulated processor is slower than the original phone's own (104 MHz).
   phone: 50,
+  // ... and below which a game the device sets the pace of runs clearly
+  // slower than a fast computer runs it: a warning, not a fault. The
+  // reference laptop interprets 134 to 139 million a second in Shadowkey, 102
+  // pinned to one core and 90 to 92 with the machine busy (nothing is said
+  // there); under a quota of half a core it does 57 and Shadowkey draws half
+  // its frames.
+  fast: 80,
   // The refreshes a second the emulator's frame limit stands for when it is
   // not known, and when it is switched off (the emulator then uses 240).
   refresh: 60,
@@ -289,6 +296,20 @@ export default {
         detail: `The emulated phone's processor was busy ${percent(data.busy)} of the last ${Math.round(data.seconds)} seconds and the game still fell behind: ${behind}.`
           + (shown ? ` The game showed ${shown}.` : ''),
         advice: 'Close other programs and browser tabs, plug the device in and switch off its power saving, then try again. If nothing changes, this game needs a faster device.',
+      }];
+    }
+
+    // The device sets the pace and is faster than the phone was, but well
+    // behind a fast computer: the game runs, slower than it can.
+    if (who === 'device' && Number.isFinite(data.mipsCode) && data.mipsCode < LIMITS.fast) {
+      return [{
+        code: 'cpu-bound',
+        level: 'warn',
+        title: 'This device holds the game back.',
+        detail: `The emulated phone's processor was busy ${percent(data.busy)} of the last ${Math.round(data.seconds)} seconds, so the game runs as fast as this device lets it.`
+          + ` The device ran the game's code at ${number(data.mipsCode, 0)} million instructions a second; a fast computer does more than ${LIMITS.fast + 20}.`
+          + (shown ? ` The game showed ${shown}.` : '') + (lateText ? ` ${lateText[0].toUpperCase()}${lateText.slice(1)}.` : ''),
+        advice: 'Close other programs and browser tabs, plug the device in and switch off its power saving, then try again. On a faster device this game runs faster.',
       }];
     }
 

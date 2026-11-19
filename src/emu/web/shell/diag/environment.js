@@ -38,17 +38,17 @@ export const REFERENCE_MIPS = { wasm: 660, js: 365 };
 // the game, the one that draws, the sound mixer, and the page's own.
 export const BUSY_THREADS = 4;
 
-// The score the most demanding game needs: on the reference machine
-// Shadowkey in play keeps its frame rate with the emulated processor well
-// under full load, and at about half that machine's speed it starts to fall
-// behind. The one number to change when that is measured better.
-export const GAME_NEEDS = 0.5;
+// The score below which the device runs a game's code slower than the phone
+// did. The speed section (speed.js) measures that directly while a game is
+// played: the reference machine interprets about 135 million instructions a
+// second, the phone ran about 50 (LIMITS.phone there), which is 0.37 of it.
+export const GAME_NEEDS = 0.4;
 
-// device-slow: below `bad` a demanding game cannot keep its frame rate;
-// below `warn` it is said as a warning, the margin above what a game needs
-// being for a test of two seconds that says more than the device keeps up
-// for an hour, and for games heavier than the ones measured.
-export const SLOW = { warn: GAME_NEEDS * 1.3, bad: GAME_NEEDS };
+// device-slow: below `bad` the device is slower than the phone and a
+// demanding game cannot keep its pace. Below `warn` such a game runs, clearly
+// slower than on a fast computer: the speed section warns below 80 million a
+// second (LIMITS.fast there), 0.6 of the reference.
+export const SLOW = { warn: 0.6, bad: GAME_NEEDS };
 
 // main-thread-stalls: in the last two minutes of play that were watched, the
 // page's thread was held up at least `count` times and for at least `share`
@@ -286,7 +286,7 @@ function benchRow(bench, spare) {
   return {
     label,
     value: `${percent(bench.score)} of the reference computer`,
-    note: `${how} The most demanding games need about ${percent(GAME_NEEDS)}.`,
+    note: `${how} Below about ${percent(SLOW.warn)} demanding games run slower than they can, below ${percent(GAME_NEEDS)} they cannot keep their pace.`,
     mark: bench.score < SLOW.bad ? 'bad' : bench.score < SLOW.warn ? 'warn' : 'ok',
   };
 }
@@ -411,7 +411,7 @@ const section = {
         code: 'device-slow',
         level: bad ? 'bad' : 'warn',
         title: bad ? 'This device is too slow for demanding games' : 'This device is on the slow side for demanding games',
-        detail: `In the speed test it reached ${percent(bench.score)} of the speed of the computer the games are tested on. The most demanding games need about ${percent(needs)} to run at full speed.`
+        detail: `In the speed test it reached ${percent(bench.score)} of the speed of the computer the games are tested on. Below about ${percent(needs)} the most demanding games cannot keep their pace; between that and ${percent(SLOW.warn)} they run, slower than on a fast computer.`
           + (Number.isFinite(bench.bestScore) && bench.bestScore >= bench.score * UNEVEN
             ? ` The speed was uneven, ${percent(bench.bestScore)} at its best, as it is when other programs use the processor or the device saves power.` : '')
           + (bench.withGame ? ' A game was running during the test, which can lower the result.' : ''),
