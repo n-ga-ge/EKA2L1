@@ -49,7 +49,11 @@ const TICK_GAP_MS = 1000; // the frame counter was not read for this long: nothi
 const REDRAW_MS = 250; // the frame graph is redrawn this often at most
 const FINDINGS_EVERY = 5; // samples, so seconds, between two questions for the findings
 const FINDINGS_SHOWN = 2;
-const LONG_FRAME = 2; // a frame is long when it took more than this many typical ones
+// A frame is long when it took more than this many typical ones. Not a whole
+// number: frame times are multiples of the screen's refresh interval, and a
+// frame that slipped by one interval must not sit exactly on the line.
+const LONG_FRAME = 2.5;
+const STALE_MS = 3000; // no sample for this long: the numbers shown are not "now" any more
 
 // The top of a graph is the first of these that the data fits under, so that
 // the scale reads as a round number and does not move with every sample.
@@ -220,7 +224,7 @@ export function pacing(list) {
     typical,
     longest: times[times.length - 1],
     longAbove: typical * LONG_FRAME,
-    top: ceiling(typical * 2.5, FRAME_STEPS),
+    top: ceiling(typical * 3 - 1, FRAME_STEPS),
   };
 }
 
@@ -341,10 +345,21 @@ class Hud {
     this.sinceFindings = 0;
     this.asking = false;
     this.game = null; // the uid of the game the findings shown are about
+    this.sampledAt = 0; // when the last sample came
+    this.askedAt = 0;
     this.texts = new Map(); // what each text node shows, so that nothing is written twice
     this.tick = this.tick.bind(this);
-    // A page that comes back from the background shows what happened meanwhile at once.
-    this.seen = () => { if (!document.hidden) this.update(); };
+    // A page that goes to the background stops the frame times there, however
+    // short the time (no animation frame comes to notice it); one that comes
+    // back shows what happened meanwhile at once.
+    this.seen = () => {
+      if (document.hidden) {
+        this.pacer.rest();
+      } else {
+        this.sampledAt = performance.now(); // a page in the background is sampled rarely: that is not the emulator's silence
+        this.update();
+      }
+    };
 
     if (button) {
       button.addEventListener('click', () => {
@@ -377,6 +392,7 @@ class Hud {
       this.stopListening = this.diag.onSample((sample) => this.sample(sample));
       document.addEventListener('visibilitychange', this.seen);
       this.forget();
+      this.sampledAt = performance.now();
       this.update();
     } else {
       this.stopListening();
@@ -427,8 +443,11 @@ class Hud {
   // Every second, with the diagnostics' sample.
   sample(sample) {
     if (!this.on) return;
+    this.sampledAt = sample.t;
     this.update();
     if (this.root.hidden || sample.hidden) return;
+    // A paused game's findings do not change, except that there are none yet.
+    if (this.page.paused && this.game !== null) return;
     if (++this.sinceFindings >= FINDINGS_EVERY) this.ask();
   }
 
@@ -439,7 +458,9 @@ class Hud {
     const shown = Boolean(page.emu && page.app);
     if (this.root.hidden === shown) this.root.hidden = !shown;
     if (!shown) {
+      // The game ended: what was found belongs to that run of it.
       this.pacer.rest();
+      if (this.game !== null) this.forget();
       return;
     }
     if (this.game !== null && this.game !== page.app.uid) this.forget();
@@ -484,7 +505,16 @@ class Hud {
     const page = this.page;
     if (!this.on || !page.emu || !page.app || page.paused) {
       this.pacer.rest();
+      if (this.on) this.update(); // says "paused" now and not with the next sample
       return;
+    }
+    // The samples stopped (the emulator does not answer): the head line must
+    // not go on showing the last rate as if it were measured now, and the
+    // findings, which may say why, are asked for from here.
+    if (now - this.sampledAt > STALE_MS && now - this.askedAt > FINDINGS_EVERY * 1000) {
+      this.write(this.parts.fps, '–');
+      this.write(this.parts.stretch, 'no measurement');
+      this.ask();
     }
     this.pacer.tick(now, page.emu.frames());
     if (this.pacer.changed && now - this.drawnAt >= REDRAW_MS) {
@@ -501,6 +531,7 @@ class Hud {
     if (this.asking || (dialog && dialog.open)) return;
     this.asking = true;
     this.sinceFindings = 0;
+    this.askedAt = performance.now();
     const game = this.page.app ? this.page.app.uid : null;
     try {
       const { ctx, findings } = await this.diag.collect();

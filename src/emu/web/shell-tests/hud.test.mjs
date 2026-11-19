@@ -215,16 +215,20 @@ test('Pacer: keeps the newest times only', () => {
 test('pacing: the typical frame, the longest, and from where a frame is long', () => {
   assert.equal(pacing([]), null);
   assert.equal(pacing([null]), null);
-  const pace = pacing([50, 50, null, 66, 50, 400, 50, 101]);
+  const pace = pacing([50, 50, null, 66, 50, 400, 50, 133]);
   assert.equal(pace.typical, 50);
   assert.equal(pace.longest, 400);
-  assert.equal(pace.longAbove, 100);
-  assert.deepEqual([50, 66, 100, 101, 400].filter((ms) => ms > pace.longAbove), [101, 400]);
+  // Above two typical frames and below three: a frame that slipped by one
+  // refresh interval is on neither side by a rounding error.
+  assert.equal(pace.longAbove, 125);
+  assert.deepEqual([50, 66, 100, 117, 133, 400].filter((ms) => ms > pace.longAbove), [133, 400]);
   assert.equal(pace.top, 150);
 });
 
 test('pacing: the top of the graph is a round number above the typical frame', () => {
   assert.equal(pacing([16.7, 16.7, 16.7]).top, 50);
+  assert.equal(pacing([50]).top, 150);
+  assert.equal(pacing([66.67]).top, 200);
   assert.equal(pacing([100]).top, 300);
   assert.equal(pacing([9000]).top, 5000);
 });

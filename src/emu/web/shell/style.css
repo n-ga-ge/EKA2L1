@@ -64,10 +64,10 @@ canvas { display: block; width: 100%; height: 100%; object-fit: contain; image-r
 /* The performance overlay (diag/hud.js): a small panel in the stage's corner
    while a game runs. It is inside the stage, so the touch keys beside or below
    it are never covered, and it takes no pointer events, so a touch or a click
-   on it reaches what is under it. Its size is fixed and its contents are
-   contained: what it rewrites every second moves nothing else on the page. */
+   on it reaches what is under it. Its width is fixed, it is never taller
+   than the stage, and its contents are contained: what it rewrites every second moves nothing else on the page. */
 #hud { position: absolute; left: 6px; top: 6px; width: 184px; padding: 4px 6px 5px; border-radius: 6px; background: rgba(8, 10, 12, .74); color: var(--text);
-  font: 11px/1.3 system-ui, sans-serif; font-variant-numeric: tabular-nums; pointer-events: none; contain: content; }
+  font: 11px/1.3 system-ui, sans-serif; font-variant-numeric: tabular-nums; pointer-events: none; contain: content; max-height: calc(100% - 12px); overflow: hidden; }
 #hud[hidden], #hud [hidden] { display: none; }
 #hud .hud-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; white-space: nowrap; }
 #hud b { font-size: 15px; }
