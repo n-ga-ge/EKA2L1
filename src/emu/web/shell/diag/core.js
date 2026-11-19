@@ -374,7 +374,12 @@ export class Diagnostics {
         console.warn(`diagnostics: ${entry.id}.render failed`, error);
         nodes = [el('p', { class: 'hint' }, 'This part could not be shown.')];
       }
-      part.content.replaceChildren(...[nodes].flat().filter(Boolean));
+      // A section that gives the very nodes that are there keeps them in
+      // place, so that a button of its own is not taken out from under a
+      // click or the keyboard every second.
+      const next = [nodes].flat().filter(Boolean);
+      const there = part.content.childNodes;
+      if (next.length !== there.length || next.some((node, index) => node !== there[index])) part.content.replaceChildren(...next);
     }
     for (const [id, part] of this.parts.sections) {
       if (!shown.has(id)) part.node.remove();
